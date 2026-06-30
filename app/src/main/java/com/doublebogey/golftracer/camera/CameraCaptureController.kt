@@ -22,6 +22,7 @@ import java.util.Locale
 class CameraCaptureController(
     private val context: Context,
     private val textureView: TextureView,
+    // Status is delivered on the calling callback thread. Task 6's caller will marshal to UI.
     private val onStatus: (String) -> Unit,
 ) {
     private val cameraManager: CameraManager =
@@ -39,6 +40,7 @@ class CameraCaptureController(
     private var frameCount = 0L
     private var lastFps = 0.0
     private var lastStatusTimestampNs = 0L
+    private var openingCamera = false
 
     @Volatile
     private var started = false
@@ -73,10 +75,7 @@ class CameraCaptureController(
 
         started = true
         generation += 1
-        frameCount = 0L
-        lastFps = 0.0
-        lastStatusTimestampNs = 0L
-        fpsCounter.reset()
+        resetFrameStats()
         startBackgroundThread()
 
         textureView.surfaceTextureListener = surfaceTextureListener
@@ -90,19 +89,17 @@ class CameraCaptureController(
     fun stop() {
         generation += 1
         started = false
+        openingCamera = false
         textureView.surfaceTextureListener = null
 
-        closeActiveCaptureResources()
+        closeActiveCaptureResources(releasePreviewSurface = true)
 
         cameraDevice?.close()
         cameraDevice = null
 
         selectedMode = null
         remainingModes.clear()
-        frameCount = 0L
-        lastFps = 0.0
-        lastStatusTimestampNs = 0L
-        fpsCounter.reset()
+        resetFrameStats()
 
         stopBackgroundThread()
     }
@@ -134,7 +131,7 @@ class CameraCaptureController(
     }
 
     private fun openRearCameraIfReady(callbackGeneration: Int) {
-        if (!isCurrent(callbackGeneration) || cameraDevice != null) {
+        if (!isCurrent(callbackGeneration) || cameraDevice != null || openingCamera) {
             return
         }
 
@@ -144,13 +141,23 @@ class CameraCaptureController(
             return
         }
 
-        val cameraConfig = findRearCameraConfig()
-        if (cameraConfig == null) {
-            stop()
+        val texture = textureView.surfaceTexture
+        if (texture == null) {
+            emitStatusFromCallingThread("Camera preview surface unavailable")
             return
         }
 
+        val cameraConfig = findRearCameraConfig()
+        if (cameraConfig == null) {
+            closeCameraResourcesFromCallback(callbackGeneration, null)
+            return
+        }
+
+        val firstMode = cameraConfig.rankedModes.first()
+        texture.setDefaultBufferSize(firstMode.width, firstMode.height)
+        previewSurface = Surface(texture)
         remainingModes = ArrayDeque(cameraConfig.rankedModes)
+        openingCamera = true
         emitStatusFromCallingThread("Opening rear camera with ${cameraConfig.rankedModes.size} candidate modes")
 
         openCamera(cameraConfig.cameraId, handler, callbackGeneration)
@@ -264,6 +271,7 @@ class CameraCaptureController(
                             return
                         }
 
+                        openingCamera = false
                         cameraDevice = camera
                         tryNextMode(camera, callbackGeneration, null)
                     }
@@ -274,8 +282,8 @@ class CameraCaptureController(
                             return
                         }
 
-                        emitStatusFromCallingThread("Camera disconnected")
-                        stop()
+                        openingCamera = false
+                        closeCameraResourcesFromCallback(callbackGeneration, "Camera disconnected")
                     }
 
                     override fun onError(camera: CameraDevice, error: Int) {
@@ -284,15 +292,16 @@ class CameraCaptureController(
                             return
                         }
 
-                        emitStatusFromCallingThread("Camera error $error")
-                        stop()
+                        openingCamera = false
+                        closeCameraResourcesFromCallback(callbackGeneration, "Camera error $error")
                     }
                 },
                 handler,
             )
         } catch (exception: Exception) {
+            openingCamera = false
             emitStatusFromCallingThread("Failed to open camera: ${exception.statusDetail()}")
-            stop()
+            closeCameraResourcesFromCallback(callbackGeneration, null)
         }
     }
 
@@ -302,28 +311,36 @@ class CameraCaptureController(
             return
         }
 
-        closeActiveCaptureResources()
+        closeActiveCaptureResources(releasePreviewSurface = false)
 
         if (remainingModes.isEmpty()) {
             val failureDetail = previousFailure?.let { ": $it" }.orEmpty()
-            emitStatusFromCallingThread("No viable rear camera capture mode remaining$failureDetail")
-            stop()
+            closeCameraResourcesFromCallback(callbackGeneration, "No viable rear camera capture mode remaining$failureDetail")
             return
         }
 
         val mode = remainingModes.removeFirst()
         selectedMode = mode
-        imageReader = createImageReader(mode)
+        imageReader = createImageReader(mode, callbackGeneration)
         emitStatusFromCallingThread("Trying camera mode ${mode.statusLabel()} (${remainingModes.size} fallback modes remain)")
         createCaptureSession(camera, mode, callbackGeneration)
     }
 
-    private fun createImageReader(mode: CaptureMode): ImageReader =
+    private fun createImageReader(mode: CaptureMode, callbackGeneration: Int): ImageReader =
         ImageReader.newInstance(mode.width, mode.height, ImageFormat.YUV_420_888, MAX_IMAGES).apply {
             setOnImageAvailableListener(
                 { reader ->
-                    val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    val image = try {
+                        reader.acquireLatestImage()
+                    } catch (exception: IllegalStateException) {
+                        return@setOnImageAvailableListener
+                    } ?: return@setOnImageAvailableListener
+
                     try {
+                        if (!isCurrent(callbackGeneration)) {
+                            return@setOnImageAvailableListener
+                        }
+
                         val yPlane = image.planes.firstOrNull()
                         val yBuffer = yPlane?.buffer
                         val firstLuma = if (yBuffer != null && yBuffer.remaining() > 0) {
@@ -356,16 +373,12 @@ class CameraCaptureController(
 
     private fun createCaptureSession(camera: CameraDevice, mode: CaptureMode, callbackGeneration: Int) {
         val handler = backgroundHandler
-        val texture = textureView.surfaceTexture
+        val preview = previewSurface
         val reader = imageReader
-        if (handler == null || texture == null || reader == null) {
+        if (handler == null || preview == null || reader == null) {
             tryNextMode(camera, callbackGeneration, "capture session prerequisites missing")
             return
         }
-
-        texture.setDefaultBufferSize(mode.width, mode.height)
-        val preview = Surface(texture)
-        previewSurface = preview
 
         try {
             camera.createCaptureSession(
@@ -424,17 +437,40 @@ class CameraCaptureController(
         }
     }
 
-    private fun closeActiveCaptureResources() {
+    private fun closeCameraResourcesFromCallback(callbackGeneration: Int, status: String?) {
+        if (!isCurrent(callbackGeneration)) {
+            return
+        }
+
+        status?.let(::emitStatusFromCallingThread)
+        closeActiveCaptureResources(releasePreviewSurface = true)
+        cameraDevice?.close()
+        cameraDevice = null
+        selectedMode = null
+        remainingModes.clear()
+        resetFrameStats()
+    }
+
+    private fun closeActiveCaptureResources(releasePreviewSurface: Boolean) {
         captureSession?.close()
         captureSession = null
 
-        imageReader?.close()
+        imageReader?.let { reader ->
+            reader.setOnImageAvailableListener(null, null)
+            reader.close()
+        }
         imageReader = null
 
-        previewSurface?.release()
-        previewSurface = null
+        if (releasePreviewSurface) {
+            previewSurface?.release()
+            previewSurface = null
+        }
 
         selectedMode = null
+        resetFrameStats()
+    }
+
+    private fun resetFrameStats() {
         frameCount = 0L
         lastFps = 0.0
         lastStatusTimestampNs = 0L
@@ -443,7 +479,6 @@ class CameraCaptureController(
 
     private fun isCurrent(callbackGeneration: Int): Boolean = started && generation == callbackGeneration
 
-    // Camera callbacks use the background handler; Task 6's caller is responsible for UI marshaling.
     private fun emitStatusFromCallingThread(message: String) {
         onStatus(message)
     }
