@@ -28,6 +28,8 @@ class MainActivity : Activity() {
 
     private var activeNetworkController: RoleNetworkController? = null
     private var activeCameraController: CameraCaptureController? = null
+    private var currentRole: RoleChoice? = null
+    private var uiGeneration = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,8 +55,28 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode != PERMISSIONS_REQUEST_CODE || currentRole != RoleChoice.Camera) {
+            return
+        }
+
+        val cameraPermissionIndex = permissions.indexOf(Manifest.permission.CAMERA)
+        val cameraGranted = cameraPermissionIndex >= 0 &&
+            grantResults.getOrNull(cameraPermissionIndex) == PackageManager.PERMISSION_GRANTED
+        if (cameraGranted) {
+            activeCameraController?.start()
+        }
+    }
+
     private fun showRoleSelector(lastRole: RoleChoice?) {
         stopActiveController()
+        currentRole = null
         setContentView(
             verticalLayout {
                 addView(
@@ -81,11 +103,13 @@ class MainActivity : Activity() {
         }
 
         stopActiveController()
+        currentRole = role
+        val screenGeneration = nextUiGeneration()
         preferences.edit().putString(KEY_LAST_ROLE, role.persistedName).apply()
 
         lateinit var statusText: TextView
         val controller = DisplayNetworkController(this) { status ->
-            runOnUiThread {
+            updateIfCurrent(screenGeneration) {
                 statusText.text = status
             }
         }
@@ -113,6 +137,8 @@ class MainActivity : Activity() {
 
     private fun showCameraScreen() {
         stopActiveController()
+        currentRole = RoleChoice.Camera
+        val screenGeneration = nextUiGeneration()
         preferences.edit().putString(KEY_LAST_ROLE, RoleChoice.Camera.persistedName).apply()
 
         val textureView = TextureView(this)
@@ -120,15 +146,19 @@ class MainActivity : Activity() {
             launchZone = readLaunchZone()
             onLaunchZoneChanged = ::persistLaunchZone
         }
-        val cameraStatusText = overlayText("Starting camera...")
-        val networkStatusText = overlayText("Starting network...")
+        val cameraStatusText = overlayText("Starting camera...").apply {
+            gravity = Gravity.START
+        }
+        val networkStatusText = overlayText("Starting network...").apply {
+            gravity = Gravity.END
+        }
         val networkController = CameraNetworkController(this) { status ->
-            runOnUiThread {
+            updateIfCurrent(screenGeneration) {
                 networkStatusText.text = status
             }
         }
         val cameraController = CameraCaptureController(this, textureView) { status ->
-            runOnUiThread {
+            updateIfCurrent(screenGeneration) {
                 cameraStatusText.text = status
             }
         }
@@ -154,21 +184,29 @@ class MainActivity : Activity() {
                     ),
                 )
                 addView(
-                    cameraStatusText,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        Gravity.TOP or Gravity.START,
-                    ).apply {
-                        setMargins(12.dp, 12.dp, 12.dp, 12.dp)
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            cameraStatusText,
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ),
+                        )
+                        addView(
+                            networkStatusText,
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ).apply {
+                                topMargin = 4.dp
+                            },
+                        )
                     },
-                )
-                addView(
-                    networkStatusText,
                     FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.WRAP_CONTENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        Gravity.TOP or Gravity.END,
+                        Gravity.TOP,
                     ).apply {
                         setMargins(12.dp, 12.dp, 12.dp, 12.dp)
                     },
@@ -212,6 +250,7 @@ class MainActivity : Activity() {
     }
 
     private fun stopActiveController() {
+        invalidateUiGeneration()
         activeCameraController?.stop()
         activeCameraController = null
         activeNetworkController?.stop()
@@ -262,6 +301,23 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.argb(160, 0, 0, 0))
             setPadding(8.dp, 6.dp, 8.dp, 6.dp)
         }
+
+    private fun updateIfCurrent(screenGeneration: Int, update: () -> Unit) {
+        runOnUiThread {
+            if (screenGeneration == uiGeneration) {
+                update()
+            }
+        }
+    }
+
+    private fun nextUiGeneration(): Int {
+        uiGeneration += 1
+        return uiGeneration
+    }
+
+    private fun invalidateUiGeneration() {
+        uiGeneration += 1
+    }
 
     private fun readLaunchZone(): LaunchZone =
         LaunchZone.fromPersisted(
