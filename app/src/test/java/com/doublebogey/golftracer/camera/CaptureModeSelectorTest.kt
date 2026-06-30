@@ -64,4 +64,19 @@ class CaptureModeSelectorTest {
 
         assertTrue(exception.message!!.contains("candidate", ignoreCase = true))
     }
+    @Test
+    fun choosesPracticalHighSpeedModeFromPlausibleAndroidCameraModes() {
+        val selected = CaptureModeSelector.select(
+            listOf(
+                CaptureModeCandidate(width = 3840, height = 2160, minFps = 30, maxFps = 30, highSpeed = false),
+                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 60, highSpeed = false),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60, highSpeed = false),
+                CaptureModeCandidate(width = 1920, height = 1080, minFps = 120, maxFps = 120, highSpeed = true),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 120, maxFps = 120, highSpeed = true),
+                CaptureModeCandidate(width = 640, height = 480, minFps = 240, maxFps = 240, highSpeed = true),
+            ),
+        )
+
+        assertEquals(CaptureMode(width = 640, height = 480, minFps = 240, maxFps = 240, highSpeed = true), selected)
+    }
 }

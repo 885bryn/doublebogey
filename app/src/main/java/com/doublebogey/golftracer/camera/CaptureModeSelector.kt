@@ -9,12 +9,11 @@ object CaptureModeSelector {
         require(candidates.isNotEmpty()) { "Capture mode candidate list must not be empty." }
 
         return candidates
-            .sortedWith(
-                compareByDescending<CaptureModeCandidate> { it.maxFps }
-                    .thenByDescending { it.highSpeed }
-                    .thenBy { abs(it.area - TargetArea) },
+            .maxWith(
+                compareBy<CaptureModeCandidate> { it.maxFps }
+                    .thenBy { it.highSpeed }
+                    .thenBy { -abs(it.area - TargetArea) },
             )
-            .first()
             .toCaptureMode()
     }
 
