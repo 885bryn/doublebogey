@@ -3,6 +3,10 @@ package com.doublebogey.golftracer.camera
 class FpsCounter(private val maxSamples: Int = 30) {
     private val timestamps = ArrayDeque<Long>()
 
+    init {
+        require(maxSamples > 0) { "maxSamples must be greater than 0" }
+    }
+
     fun recordFrame(timestampNs: Long): Double {
         timestamps.addLast(timestampNs)
         while (timestamps.size > maxSamples) {
