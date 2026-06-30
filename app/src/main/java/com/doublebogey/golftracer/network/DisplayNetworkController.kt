@@ -126,12 +126,14 @@ class DisplayNetworkController(
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (this@DisplayNetworkController.webSocket !== webSocket) return
                     this@DisplayNetworkController.webSocket = null
                     onStatus("Socket closed: " + reason)
                     reconnectLater()
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (this@DisplayNetworkController.webSocket !== webSocket) return
                     this@DisplayNetworkController.webSocket = null
                     onStatus("Socket failed: " + (t.message ?: t.javaClass.simpleName))
                     reconnectLater()
