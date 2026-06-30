@@ -11,11 +11,16 @@ import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.doublebogey.golftracer.network.CameraNetworkController
+import com.doublebogey.golftracer.network.DisplayNetworkController
+import com.doublebogey.golftracer.network.RoleNetworkController
 
 class MainActivity : Activity() {
     private val preferences by lazy {
         getSharedPreferences("doublebogey-role", Context.MODE_PRIVATE)
     }
+
+    private var activeController: RoleNetworkController? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,6 +47,7 @@ class MainActivity : Activity() {
     }
 
     private fun showRoleSelector(lastRole: RoleChoice?) {
+        stopActiveController()
         setContentView(
             verticalLayout {
                 addView(
@@ -62,12 +68,23 @@ class MainActivity : Activity() {
     }
 
     private fun showRoleScreen(role: RoleChoice) {
+        stopActiveController()
         preferences.edit().putString(KEY_LAST_ROLE, role.persistedName).apply()
+
+        lateinit var statusText: TextView
+        val controller = createController(role) { status ->
+            runOnUiThread {
+                statusText.text = status
+            }
+        }
+        activeController = controller
 
         setContentView(
             verticalLayout {
-                addView(titleText(text = "${role.label} role", sizeSp = 28f))
+                addView(titleText(text = role.label + " role", sizeSp = 28f))
                 addView(bodyText(text = placeholderText(role)))
+                statusText = bodyText(text = "Starting network...")
+                addView(statusText)
                 addView(
                     Button(this@MainActivity).apply {
                         text = "Change role"
@@ -78,8 +95,25 @@ class MainActivity : Activity() {
                 )
             },
         )
+
+        controller.start()
     }
 
+    private fun createController(role: RoleChoice, onStatus: (String) -> Unit): RoleNetworkController =
+        when (role) {
+            RoleChoice.Camera -> CameraNetworkController(this, onStatus)
+            RoleChoice.Display -> DisplayNetworkController(this, onStatus)
+        }
+
+    private fun stopActiveController() {
+        activeController?.stop()
+        activeController = null
+    }
+
+    override fun onDestroy() {
+        stopActiveController()
+        super.onDestroy()
+    }
     private fun roleButton(role: RoleChoice): Button =
         Button(this).apply {
             text = role.label
