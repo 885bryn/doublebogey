@@ -132,7 +132,7 @@ class MainActivity : Activity() {
             },
         )
 
-        controller.start()
+        startActiveControllers()
     }
 
     private fun showCameraScreen() {
@@ -245,16 +245,41 @@ class MainActivity : Activity() {
             },
         )
 
-        networkController.start()
-        cameraController.start()
+        startActiveControllers()
+    }
+
+    private fun startActiveControllers() {
+        activeNetworkController?.start()
+        if (currentRole == RoleChoice.Camera) {
+            activeCameraController?.start()
+        }
+    }
+
+    private fun stopActiveControllersForLifecycle() {
+        activeCameraController?.stop()
+        activeNetworkController?.stop()
     }
 
     private fun stopActiveController() {
         invalidateUiGeneration()
-        activeCameraController?.stop()
+        stopActiveControllersForLifecycle()
         activeCameraController = null
-        activeNetworkController?.stop()
         activeNetworkController = null
+    }
+
+    override fun onResume() {
+        super.onResume()
+        startActiveControllers()
+    }
+
+    override fun onPause() {
+        stopActiveControllersForLifecycle()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        stopActiveControllersForLifecycle()
+        super.onStop()
     }
 
     override fun onDestroy() {

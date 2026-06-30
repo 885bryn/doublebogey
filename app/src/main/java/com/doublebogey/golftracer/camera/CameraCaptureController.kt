@@ -194,41 +194,28 @@ class CameraCaptureController(
             return null
         }
 
-        val yuvSizes = streamMap.getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
-        if (yuvSizes.isEmpty()) {
+        val yuvOutputs = streamMap.getOutputSizes(ImageFormat.YUV_420_888)?.map { size ->
+            CaptureModeOutput(
+                width = size.width,
+                height = size.height,
+                minFrameDurationNs = streamMap.getOutputMinFrameDuration(ImageFormat.YUV_420_888, size),
+            )
+        }.orEmpty()
+        if (yuvOutputs.isEmpty()) {
             emitStatusFromCallingThread("Rear camera has no YUV_420_888 output sizes")
             return null
         }
 
         val fpsRanges = characteristics
             .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            ?.toList()
+            ?.map { range -> CaptureFpsRange(minFps = range.lower, maxFps = range.upper) }
             .orEmpty()
-            .filter { it.lower > 0 && it.upper >= it.lower }
         if (fpsRanges.isEmpty()) {
             emitStatusFromCallingThread("Rear camera has no target FPS ranges")
             return null
         }
 
-        val candidates = yuvSizes.flatMap { size ->
-            fpsRanges.map { range ->
-                CaptureModeCandidate(
-                    width = size.width,
-                    height = size.height,
-                    minFps = range.lower,
-                    maxFps = range.upper,
-                    highSpeed = false,
-                )
-            }
-        }.distinctBy { candidate ->
-            ModeKey(
-                width = candidate.width,
-                height = candidate.height,
-                minFps = candidate.minFps,
-                maxFps = candidate.maxFps,
-                highSpeed = candidate.highSpeed,
-            )
-        }
+        val candidates = CaptureModeSelector.standardCandidates(yuvOutputs, fpsRanges)
 
         val rankedModes = rankCaptureModes(candidates)
         if (rankedModes.isEmpty()) {
@@ -528,17 +515,13 @@ class CameraCaptureController(
         onStatus(message)
     }
 
-    private fun CaptureMode.statusLabel(): String {
-        val speed = if (highSpeed) " high-speed" else ""
-        return "${width}x$height @ ${minFps}-${maxFps}fps$speed"
-    }
+    private fun CaptureMode.statusLabel(): String = "${width}x$height @ ${minFps}-${maxFps}fps standard"
 
     private fun CaptureModeCandidate.matches(mode: CaptureMode): Boolean =
         width == mode.width &&
             height == mode.height &&
             minFps == mode.minFps &&
-            maxFps == mode.maxFps &&
-            highSpeed == mode.highSpeed
+            maxFps == mode.maxFps
 
     private fun Double.formatFps(): String = String.format(Locale.US, "%.1f", this)
 
@@ -547,14 +530,6 @@ class CameraCaptureController(
     private data class CameraConfig(
         val cameraId: String,
         val rankedModes: List<CaptureMode>,
-    )
-
-    private data class ModeKey(
-        val width: Int,
-        val height: Int,
-        val minFps: Int,
-        val maxFps: Int,
-        val highSpeed: Boolean,
     )
 
     private companion object {

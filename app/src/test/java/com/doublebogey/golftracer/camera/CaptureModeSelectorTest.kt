@@ -10,50 +10,38 @@ class CaptureModeSelectorTest {
     fun choosesHighestFpsCandidate() {
         val selected = CaptureModeSelector.select(
             listOf(
-                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60, highSpeed = false),
-                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 120, highSpeed = false),
-                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 30, highSpeed = false),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 120),
+                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 30),
             ),
         )
 
-        assertEquals(CaptureMode(width = 640, height = 480, minFps = 30, maxFps = 120, highSpeed = false), selected)
-    }
-
-    @Test
-    fun prefersHighSpeedModeWhenFpsTies() {
-        val selected = CaptureModeSelector.select(
-            listOf(
-                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 120, highSpeed = false),
-                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 120, highSpeed = true),
-            ),
-        )
-
-        assertEquals(CaptureMode(width = 1920, height = 1080, minFps = 30, maxFps = 120, highSpeed = true), selected)
+        assertEquals(CaptureMode(width = 640, height = 480, minFps = 30, maxFps = 120), selected)
     }
 
     @Test
     fun choosesCandidateClosestTo720pAmongEqualFpsModes() {
         val selected = CaptureModeSelector.select(
             listOf(
-                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 60, highSpeed = false),
-                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60, highSpeed = false),
-                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 60, highSpeed = false),
+                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 60),
             ),
         )
 
-        assertEquals(CaptureMode(width = 1280, height = 720, minFps = 30, maxFps = 60, highSpeed = false), selected)
+        assertEquals(CaptureMode(width = 1280, height = 720, minFps = 30, maxFps = 60), selected)
     }
 
     @Test
-    fun fallsBackToBestStandardModeWhenNoHighSpeedCandidateExists() {
+    fun choosesHighestFpsBeforeResolution() {
         val selected = CaptureModeSelector.select(
             listOf(
-                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60, highSpeed = false),
-                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 120, highSpeed = false),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 120),
             ),
         )
 
-        assertEquals(CaptureMode(width = 1920, height = 1080, minFps = 30, maxFps = 120, highSpeed = false), selected)
+        assertEquals(CaptureMode(width = 1920, height = 1080, minFps = 30, maxFps = 120), selected)
     }
 
     @Test
@@ -64,19 +52,59 @@ class CaptureModeSelectorTest {
 
         assertTrue(exception.message!!.contains("candidate", ignoreCase = true))
     }
+
     @Test
-    fun choosesPracticalHighSpeedModeFromPlausibleAndroidCameraModes() {
-        val selected = CaptureModeSelector.select(
-            listOf(
-                CaptureModeCandidate(width = 3840, height = 2160, minFps = 30, maxFps = 30, highSpeed = false),
-                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 60, highSpeed = false),
-                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60, highSpeed = false),
-                CaptureModeCandidate(width = 1920, height = 1080, minFps = 120, maxFps = 120, highSpeed = true),
-                CaptureModeCandidate(width = 1280, height = 720, minFps = 120, maxFps = 120, highSpeed = true),
-                CaptureModeCandidate(width = 640, height = 480, minFps = 240, maxFps = 240, highSpeed = true),
+    fun buildsOnlyModesFeasibleForEachOutputSizeMinFrameDuration() {
+        val candidates = CaptureModeSelector.standardCandidates(
+            outputs = listOf(
+                CaptureModeOutput(width = 1920, height = 1080, minFrameDurationNs = 33_333_334L),
+                CaptureModeOutput(width = 1280, height = 720, minFrameDurationNs = 16_666_667L),
+                CaptureModeOutput(width = 640, height = 480, minFrameDurationNs = 8_333_334L),
+            ),
+            fpsRanges = listOf(
+                CaptureFpsRange(minFps = 30, maxFps = 30),
+                CaptureFpsRange(minFps = 30, maxFps = 60),
+                CaptureFpsRange(minFps = 30, maxFps = 120),
             ),
         )
 
-        assertEquals(CaptureMode(width = 640, height = 480, minFps = 240, maxFps = 240, highSpeed = true), selected)
+        assertEquals(
+            listOf(
+                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 30),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 30),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 30),
+                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 120),
+            ),
+            candidates,
+        )
+    }
+
+    @Test
+    fun treatsUnknownMinFrameDurationAsFeasibleForDeclaredFpsRanges() {
+        val candidates = CaptureModeSelector.standardCandidates(
+            outputs = listOf(CaptureModeOutput(width = 1280, height = 720, minFrameDurationNs = 0L)),
+            fpsRanges = listOf(CaptureFpsRange(minFps = 30, maxFps = 120)),
+        )
+
+        assertEquals(
+            listOf(CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 120)),
+            candidates,
+        )
+    }
+
+    @Test
+    fun choosesPracticalStandardModeFromPlausibleAndroidCameraModes() {
+        val selected = CaptureModeSelector.select(
+            listOf(
+                CaptureModeCandidate(width = 3840, height = 2160, minFps = 30, maxFps = 30),
+                CaptureModeCandidate(width = 1920, height = 1080, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 1280, height = 720, minFps = 30, maxFps = 60),
+                CaptureModeCandidate(width = 640, height = 480, minFps = 30, maxFps = 120),
+            ),
+        )
+
+        assertEquals(CaptureMode(width = 640, height = 480, minFps = 30, maxFps = 120), selected)
     }
 }
