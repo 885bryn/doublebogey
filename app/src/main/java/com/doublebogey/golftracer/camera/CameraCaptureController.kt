@@ -34,6 +34,7 @@ class CameraCaptureController(
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
+    private var previewTexture: SurfaceTexture? = null
     private var previewSurface: Surface? = null
     private var selectedMode: CaptureMode? = null
     private var remainingModes = ArrayDeque<CaptureMode>()
@@ -156,9 +157,7 @@ class CameraCaptureController(
             return
         }
 
-        val firstMode = cameraConfig.rankedModes.first()
-        texture.setDefaultBufferSize(firstMode.width, firstMode.height)
-        previewSurface = Surface(texture)
+        previewTexture = texture
         remainingModes = ArrayDeque(cameraConfig.rankedModes)
         openingCamera = true
         emitStatusFromCallingThread("Opening rear camera with ${cameraConfig.rankedModes.size} candidate modes")
@@ -280,23 +279,11 @@ class CameraCaptureController(
                     }
 
                     override fun onDisconnected(camera: CameraDevice) {
-                        if (!isCurrent(callbackGeneration)) {
-                            camera.close()
-                            return
-                        }
-
-                        openingCamera = false
-                        closeCameraResourcesFromCallback(callbackGeneration, "Camera disconnected")
+                        handleTerminalCameraCallback(camera, callbackGeneration, "Camera disconnected")
                     }
 
                     override fun onError(camera: CameraDevice, error: Int) {
-                        if (!isCurrent(callbackGeneration)) {
-                            camera.close()
-                            return
-                        }
-
-                        openingCamera = false
-                        closeCameraResourcesFromCallback(callbackGeneration, "Camera error $error")
+                        handleTerminalCameraCallback(camera, callbackGeneration, "Camera error $error")
                     }
                 },
                 handler,
@@ -324,6 +311,13 @@ class CameraCaptureController(
 
         val mode = remainingModes.removeFirst()
         selectedMode = mode
+        val texture = previewTexture
+        if (texture == null) {
+            closeCameraResourcesFromCallback(callbackGeneration, "preview texture unavailable for ${mode.statusLabel()}")
+            return
+        }
+        texture.setDefaultBufferSize(mode.width, mode.height)
+        previewSurface = Surface(texture)
         readerGeneration += 1
         val callbackReaderGeneration = readerGeneration
         imageReader = createImageReader(mode, callbackGeneration, callbackReaderGeneration)
@@ -450,6 +444,29 @@ class CameraCaptureController(
         }
     }
 
+    private fun handleTerminalCameraCallback(
+        camera: CameraDevice,
+        callbackGeneration: Int,
+        status: String,
+    ) {
+        if (!isCurrent(callbackGeneration)) {
+            camera.close()
+            return
+        }
+
+        openingCamera = false
+        status.let(::emitStatusFromCallingThread)
+        closeActiveCaptureResources(releasePreviewSurface = true)
+        if (cameraDevice !== camera) {
+            cameraDevice?.close()
+        }
+        cameraDevice = null
+        camera.close()
+        selectedMode = null
+        remainingModes.clear()
+        resetFrameStats()
+    }
+
     private fun closeCameraResourcesFromCallback(callbackGeneration: Int, status: String?) {
         if (!isCurrent(callbackGeneration)) {
             return
@@ -475,9 +492,11 @@ class CameraCaptureController(
         }
         imageReader = null
 
+        previewSurface?.release()
+        previewSurface = null
+
         if (releasePreviewSurface) {
-            previewSurface?.release()
-            previewSurface = null
+            previewTexture = null
         }
 
         selectedMode = null
