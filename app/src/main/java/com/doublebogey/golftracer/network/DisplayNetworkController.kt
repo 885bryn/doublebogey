@@ -58,8 +58,9 @@ class DisplayNetworkController(
                     serviceInfo.serviceName.startsWith(GolfTracerNetwork.SERVICE_NAME_PREFIX)
                 ) {
                     resolving = true
+                    val callbackGeneration = reconnectGeneration
                     onStatus("Resolving " + serviceInfo.serviceName)
-                    nsdManager.resolveService(serviceInfo, resolveListener(serviceInfo.serviceName))
+                    nsdManager.resolveService(serviceInfo, resolveListener(serviceInfo.serviceName, callbackGeneration))
                 }
             }
 
@@ -87,15 +88,17 @@ class DisplayNetworkController(
         nsdManager.discoverServices(GolfTracerNetwork.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
-    private fun resolveListener(serviceName: String): NsdManager.ResolveListener =
+    private fun resolveListener(serviceName: String, callbackGeneration: Int): NsdManager.ResolveListener =
         object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                if (!isCurrent(callbackGeneration)) return
                 resolving = false
                 onStatus("Resolve failed: " + errorCode)
                 reconnectLater()
             }
 
             override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                if (!isCurrent(callbackGeneration)) return
                 resolving = false
                 val host = serviceInfo.host?.hostAddress
                 val port = serviceInfo.port
@@ -142,6 +145,8 @@ class DisplayNetworkController(
         )
     }
 
+    private fun isCurrent(callbackGeneration: Int): Boolean = !stopped && callbackGeneration == reconnectGeneration
+
     private fun reconnectLater() {
         if (stopped) return
         val callbackGeneration = reconnectGeneration
@@ -153,6 +158,7 @@ class DisplayNetworkController(
     }
 
     private fun restartDiscovery() {
+        reconnectGeneration += 1
         discoveryListener?.let { listener ->
             runCatching { nsdManager.stopServiceDiscovery(listener) }
         }
@@ -160,7 +166,6 @@ class DisplayNetworkController(
         resolving = false
         discover()
     }
-
     override fun stop() {
         stopped = true
         reconnectGeneration += 1
