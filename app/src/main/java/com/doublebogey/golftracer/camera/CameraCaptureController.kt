@@ -14,6 +14,7 @@ import android.hardware.camera2.CaptureRequest
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Range
 import android.view.Surface
 import android.view.TextureView
@@ -28,6 +29,7 @@ class CameraCaptureController(
     private val cameraManager: CameraManager =
         context.getSystemService(CameraManager::class.java)
     private val fpsCounter = FpsCounter()
+    private val cameraCallbackHandler = Handler(Looper.getMainLooper())
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -162,7 +164,7 @@ class CameraCaptureController(
         openingCamera = true
         emitStatusFromCallingThread("Opening rear camera with ${cameraConfig.rankedModes.size} candidate modes")
 
-        openCamera(cameraConfig.cameraId, handler, callbackGeneration)
+        openCamera(cameraConfig.cameraId, callbackGeneration)
     }
 
     private fun findRearCameraConfig(): CameraConfig? {
@@ -249,7 +251,7 @@ class CameraCaptureController(
     }
 
     @SuppressLint("MissingPermission")
-    private fun openCamera(cameraId: String, handler: Handler, callbackGeneration: Int) {
+    private fun openCamera(cameraId: String, callbackGeneration: Int) {
         try {
             cameraManager.openCamera(
                 cameraId,
@@ -273,7 +275,7 @@ class CameraCaptureController(
                         handleTerminalCameraCallback(camera, callbackGeneration, "Camera error $error")
                     }
                 },
-                handler,
+                cameraCallbackHandler,
             )
         } catch (exception: Exception) {
             openingCamera = false

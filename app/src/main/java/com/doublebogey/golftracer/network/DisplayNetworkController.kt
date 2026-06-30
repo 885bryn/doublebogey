@@ -25,10 +25,12 @@ class DisplayNetworkController(
     private var webSocket: WebSocket? = null
     private var resolving = false
     private var stopped = true
+    private var reconnectGeneration = 0
 
     override fun start() {
         if (!stopped) return
         stopped = false
+        reconnectGeneration += 1
         acquireMulticastLock()
         discover()
     }
@@ -42,6 +44,7 @@ class DisplayNetworkController(
     }
 
     private fun discover() {
+        if (discoveryListener != null) return
         onStatus("Searching for Camera service...")
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
@@ -137,8 +140,9 @@ class DisplayNetworkController(
 
     private fun reconnectLater() {
         if (stopped) return
+        val callbackGeneration = reconnectGeneration
         mainHandler.postDelayed({
-            if (!stopped && webSocket == null) {
+            if (!stopped && callbackGeneration == reconnectGeneration && webSocket == null && discoveryListener == null) {
                 discover()
             }
         }, 1_500)
@@ -146,6 +150,8 @@ class DisplayNetworkController(
 
     override fun stop() {
         stopped = true
+        reconnectGeneration += 1
+        mainHandler.removeCallbacksAndMessages(null)
         resolving = false
         webSocket?.cancel()
         webSocket = null
