@@ -310,17 +310,29 @@ class CameraCaptureController(
         }
 
         val mode = remainingModes.removeFirst()
-        selectedMode = mode
         val texture = previewTexture
         if (texture == null) {
             closeCameraResourcesFromCallback(callbackGeneration, "preview texture unavailable for ${mode.statusLabel()}")
             return
         }
+
         texture.setDefaultBufferSize(mode.width, mode.height)
-        previewSurface = Surface(texture)
-        readerGeneration += 1
-        val callbackReaderGeneration = readerGeneration
-        imageReader = createImageReader(mode, callbackGeneration, callbackReaderGeneration)
+        val newPreviewSurface = Surface(texture)
+        val callbackReaderGeneration = readerGeneration + 1
+        val newImageReader = createImageReader(mode, callbackGeneration, callbackReaderGeneration)
+
+        if (!isCurrent(callbackGeneration)) {
+            newImageReader.setOnImageAvailableListener(null, null)
+            newImageReader.close()
+            newPreviewSurface.release()
+            camera.close()
+            return
+        }
+
+        selectedMode = mode
+        readerGeneration = callbackReaderGeneration
+        previewSurface = newPreviewSurface
+        imageReader = newImageReader
         emitStatusFromCallingThread("Trying camera mode ${mode.statusLabel()} (${remainingModes.size} fallback modes remain)")
         createCaptureSession(camera, mode, callbackGeneration)
     }
