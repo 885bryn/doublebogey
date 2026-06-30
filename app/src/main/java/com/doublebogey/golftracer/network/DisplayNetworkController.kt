@@ -31,6 +31,7 @@ class DisplayNetworkController(
         if (!stopped) return
         stopped = false
         reconnectGeneration += 1
+        resolving = false
         acquireMulticastLock()
         discover()
     }
@@ -45,41 +46,48 @@ class DisplayNetworkController(
 
     private fun discover() {
         if (discoveryListener != null) return
+        val discoveryGeneration = reconnectGeneration
         onStatus("Searching for Camera service...")
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
+                if (!isCurrent(discoveryGeneration)) return
                 onStatus("Browsing " + serviceType)
             }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                if (!isCurrent(discoveryGeneration)) return
                 if (
                     !resolving &&
                     serviceInfo.serviceType == GolfTracerNetwork.SERVICE_TYPE &&
                     serviceInfo.serviceName.startsWith(GolfTracerNetwork.SERVICE_NAME_PREFIX)
                 ) {
                     resolving = true
-                    val callbackGeneration = reconnectGeneration
+                    val callbackGeneration = discoveryGeneration
                     onStatus("Resolving " + serviceInfo.serviceName)
                     nsdManager.resolveService(serviceInfo, resolveListener(serviceInfo.serviceName, callbackGeneration))
                 }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                if (!isCurrent(discoveryGeneration)) return
                 onStatus("Camera service lost")
                 reconnectLater()
             }
 
             override fun onDiscoveryStopped(serviceType: String) {
+                if (!isCurrent(discoveryGeneration)) return
                 onStatus("Discovery stopped")
             }
 
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                if (!isCurrent(discoveryGeneration)) return
                 onStatus("Discovery failed: " + errorCode)
                 runCatching { nsdManager.stopServiceDiscovery(this) }
                 reconnectLater()
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                if (!isCurrent(discoveryGeneration)) return
                 onStatus("Stop discovery failed: " + errorCode)
                 runCatching { nsdManager.stopServiceDiscovery(this) }
             }
