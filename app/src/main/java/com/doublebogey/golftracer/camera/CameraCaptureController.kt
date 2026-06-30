@@ -40,6 +40,9 @@ class CameraCaptureController(
     private var frameCount = 0L
     private var lastFps = 0.0
     private var lastStatusTimestampNs = 0L
+
+    @Volatile
+    private var readerGeneration = 0
     private var openingCamera = false
 
     @Volatile
@@ -321,15 +324,25 @@ class CameraCaptureController(
 
         val mode = remainingModes.removeFirst()
         selectedMode = mode
-        imageReader = createImageReader(mode, callbackGeneration)
+        readerGeneration += 1
+        val callbackReaderGeneration = readerGeneration
+        imageReader = createImageReader(mode, callbackGeneration, callbackReaderGeneration)
         emitStatusFromCallingThread("Trying camera mode ${mode.statusLabel()} (${remainingModes.size} fallback modes remain)")
         createCaptureSession(camera, mode, callbackGeneration)
     }
 
-    private fun createImageReader(mode: CaptureMode, callbackGeneration: Int): ImageReader =
+    private fun createImageReader(
+        mode: CaptureMode,
+        callbackGeneration: Int,
+        callbackReaderGeneration: Int,
+    ): ImageReader =
         ImageReader.newInstance(mode.width, mode.height, ImageFormat.YUV_420_888, MAX_IMAGES).apply {
             setOnImageAvailableListener(
                 { reader ->
+                    if (!isCurrent(callbackGeneration) || callbackReaderGeneration != readerGeneration) {
+                        return@setOnImageAvailableListener
+                    }
+
                     val image = try {
                         reader.acquireLatestImage()
                     } catch (exception: IllegalStateException) {
@@ -337,7 +350,7 @@ class CameraCaptureController(
                     } ?: return@setOnImageAvailableListener
 
                     try {
-                        if (!isCurrent(callbackGeneration)) {
+                        if (!isCurrent(callbackGeneration) || callbackReaderGeneration != readerGeneration) {
                             return@setOnImageAvailableListener
                         }
 
@@ -455,6 +468,7 @@ class CameraCaptureController(
         captureSession?.close()
         captureSession = null
 
+        readerGeneration += 1
         imageReader?.let { reader ->
             reader.setOnImageAvailableListener(null, null)
             reader.close()
