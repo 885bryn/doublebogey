@@ -144,10 +144,19 @@ class DisplayNetworkController(
         if (stopped) return
         val callbackGeneration = reconnectGeneration
         mainHandler.postDelayed({
-            if (!stopped && callbackGeneration == reconnectGeneration && webSocket == null && discoveryListener == null) {
-                discover()
+            if (!stopped && callbackGeneration == reconnectGeneration && webSocket == null) {
+                restartDiscovery()
             }
         }, 1_500)
+    }
+
+    private fun restartDiscovery() {
+        discoveryListener?.let { listener ->
+            runCatching { nsdManager.stopServiceDiscovery(listener) }
+        }
+        discoveryListener = null
+        resolving = false
+        discover()
     }
 
     override fun stop() {
