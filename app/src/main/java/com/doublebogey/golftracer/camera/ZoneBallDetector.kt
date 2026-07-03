@@ -113,12 +113,16 @@ class ZoneBallDetector(
         model = null
     }
 
-    fun collectCalibrationFrame(frame: YuvFrame, launchZone: LaunchZone): ZoneBallDetection {
+    fun collectCalibrationFrame(
+        frame: YuvFrame,
+        launchZone: LaunchZone,
+        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
+    ): ZoneBallDetection {
         if (calibrationState != ZoneBallCalibrationState.Calibrating || calibrationZone != launchZone) {
             startCalibration(launchZone)
         }
         ensureCalibrationBuffers(frame)
-        val bounds = launchZone.bounds(frame)
+        val bounds = mapper.viewZoneToFrameZone(launchZone).bounds(frame)
         val ySum = requireNotNull(sumY)
         val uSum = requireNotNull(sumU)
         val vSum = requireNotNull(sumV)
@@ -143,7 +147,11 @@ class ZoneBallDetector(
         return ZoneBallDetection(acceptedCandidate = null, debug = debug())
     }
 
-    fun analyzeFrame(frame: YuvFrame, launchZone: LaunchZone): ZoneBallDetection {
+    fun analyzeFrame(
+        frame: YuvFrame,
+        launchZone: LaunchZone,
+        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
+    ): ZoneBallDetection {
         val background = model
         if (calibrationState != ZoneBallCalibrationState.Calibrated || background == null) {
             return ZoneBallDetection(acceptedCandidate = null, debug = debug())
@@ -177,7 +185,7 @@ class ZoneBallDetector(
                 rejectedBySize += 1
                 continue
             }
-            val candidate = component.toCandidate(frame, background)
+            val candidate = component.toCandidate(frame, background, mapper)
             if (candidate.aspectRatio < config.minAspectRatio || candidate.fillRatio < config.minFillRatio) {
                 rejectedByShape += 1
                 continue
@@ -378,7 +386,11 @@ class ZoneBallDetector(
         queue.add(index)
     }
 
-    private fun Component.toCandidate(frame: YuvFrame, background: ZoneBackgroundModel): ZoneBallCandidateDebug {
+    private fun Component.toCandidate(
+        frame: YuvFrame,
+        background: ZoneBackgroundModel,
+        mapper: FrameCoordinateMapper,
+    ): ZoneBallCandidateDebug {
         var xSum = 0.0
         var ySum = 0.0
         var significanceSum = 0.0
@@ -403,11 +415,15 @@ class ZoneBallDetector(
         val rankScore = meanSignificance * ((aspectRatio + fillRatio) / 2.0)
         val xDenominator = (frame.width - 1).coerceAtLeast(1).toDouble()
         val yDenominator = (frame.height - 1).coerceAtLeast(1).toDouble()
+        val viewCentroid = mapper.frameToView(
+            x = (xSum / area.toDouble()) / xDenominator,
+            y = (ySum / area.toDouble()) / yDenominator,
+        )
 
         return ZoneBallCandidateDebug(
             candidate = LumaMotionCandidate(
-                x = (xSum / area.toDouble()) / xDenominator,
-                y = (ySum / area.toDouble()) / yDenominator,
+                x = viewCentroid.x,
+                y = viewCentroid.y,
                 pixelCount = area,
                 confidence = (rankScore / 20.0).coerceIn(0.0, 1.0),
             ),

@@ -96,6 +96,37 @@ class ZoneBallDetectorTest {
         assertTrue(result.debug.margin < 1.5)
     }
 
+    @Test
+    fun findsBallInsidePortraitZoneOnLandscapeFrameWithRotation90() {
+        val mapper = FrameCoordinateMapper(90)
+        // Portrait view zone; on the rotated landscape buffer this covers frame
+        // x in [0.25, 0.75], y in [0.25, 0.50] (see FrameCoordinateMapper).
+        val viewZone = LaunchZone(left = 0.50, top = 0.25, width = 0.25, height = 0.50)
+        val detector = ZoneBallDetector(config)
+        detector.startCalibration(viewZone)
+        repeat(config.calibrationFramesRequired) { index ->
+            detector.collectCalibrationFrame(
+                texturedMatFrame(width = 48, height = 32, noisePhase = index),
+                viewZone,
+                mapper,
+            )
+        }
+        assertEquals(ZoneBallCalibrationState.Calibrated, detector.calibrationState)
+
+        // Ball at frame pixel (23, 11): inside the mapped frame zone, outside the raw view-zone numbers.
+        val frame = texturedMatFrame(width = 48, height = 32)
+            .withDisc(centerX = 23, centerY = 11, radius = 3, y = 165, u = 104, v = 136)
+
+        val result = detector.analyzeFrame(frame, viewZone, mapper)
+
+        val accepted = assertNotNull(result.acceptedCandidate)
+        val expectedView = mapper.frameToView(23.0 / 47.0, 11.0 / 31.0)
+        assertEquals(expectedView.x, accepted.x, absoluteTolerance = 0.03)
+        assertEquals(expectedView.y, accepted.y, absoluteTolerance = 0.03)
+        assertTrue(accepted.x in viewZone.left..viewZone.left + viewZone.width)
+        assertTrue(accepted.y in viewZone.top..viewZone.top + viewZone.height)
+    }
+
     private fun calibratedDetector(): ZoneBallDetector {
         val detector = ZoneBallDetector(config)
         detector.startCalibration(zone)

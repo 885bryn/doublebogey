@@ -22,11 +22,18 @@ class ZoneMotionMeter(
 ) {
     private var previousFrame: LumaFrame? = null
 
-    fun measure(frame: YuvFrame, launchZone: LaunchZone): ZoneMotionMeasurement =
-        measure(frame.toLumaFrame(), launchZone)
+    fun measure(
+        frame: YuvFrame,
+        launchZone: LaunchZone,
+        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
+    ): ZoneMotionMeasurement = measure(frame.toLumaFrame(), launchZone, mapper)
 
-    fun measure(frame: LumaFrame, launchZone: LaunchZone): ZoneMotionMeasurement {
-        val bounds = launchZone.bounds(frame)
+    fun measure(
+        frame: LumaFrame,
+        launchZone: LaunchZone,
+        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
+    ): ZoneMotionMeasurement {
+        val bounds = mapper.viewZoneToFrameZone(launchZone).bounds(frame)
         val previous = previousFrame
         previousFrame = frame.copy(luma = frame.luma.copyOf())
         if (previous == null || previous.width != frame.width || previous.height != frame.height) {

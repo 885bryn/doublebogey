@@ -116,6 +116,18 @@ noise (k·σ) keeps the dim half of the ball while still rejecting mat speckle.
   at 24 fps on the floor device. Acquisition only needs the launch-zone crop.
 - `LumaStillBallDetector` is dead code (referenced only by its own test).
 
+### 1d. Coordinate-space mismatch (found during field debugging, fixed 2026-07-03)
+
+The launch zone is dragged in **portrait view space**, but the sensor delivers **landscape
+1280×720 buffers**; TextureView silently rotates the buffer 90° for display. The detectors were
+applying view-space normalized zone coordinates directly to the raw frame, so they scanned a
+different patch of the mat than the one under the green box — `fg=0.0%` with an obvious ball in
+the box. Fixed by `FrameCoordinateMapper` (rotation = `(sensorOrientation − displayRotation) mod
+360`, read at camera open, `rot=` in the status line): detectors map the zone view→frame before
+scanning pixels and map centroids frame→view before emitting, so trackers/overlay/launch logic
+("up = −y") all stay in view space. Any orientation-sensitive detector work must go through this
+mapper; never apply zone coordinates to a raw frame directly.
+
 ## 2. Proposed architecture
 
 Keep the two-detector split — it matches the physics:

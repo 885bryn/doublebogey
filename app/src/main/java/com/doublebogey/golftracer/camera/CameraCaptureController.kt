@@ -52,6 +52,9 @@ class CameraCaptureController(
     private var lastDetectionOverlayTimestampNs = 0L
 
     @Volatile
+    private var coordinateMapper = FrameCoordinateMapper.Identity
+
+    @Volatile
     private var readerGeneration = 0
     private var openingCamera = false
 
@@ -174,8 +177,14 @@ class CameraCaptureController(
 
         previewTexture = texture
         remainingModes = ArrayDeque(cameraConfig.rankedModes)
+        coordinateMapper = FrameCoordinateMapper.forRearCamera(
+            sensorOrientationDegrees = cameraConfig.sensorOrientationDegrees,
+            displayRotationDegrees = currentDisplayRotationDegrees(),
+        )
         openingCamera = true
-        emitStatusFromCallingThread("Opening rear camera with ${cameraConfig.rankedModes.size} candidate modes")
+        emitStatusFromCallingThread(
+            "Opening rear camera with ${cameraConfig.rankedModes.size} candidate modes rot=${coordinateMapper.rotationDegrees}",
+        )
 
         openCamera(cameraConfig.cameraId, callbackGeneration)
     }
@@ -238,8 +247,20 @@ class CameraCaptureController(
             return null
         }
 
-        return CameraConfig(cameraId = rearCameraId, rankedModes = rankedModes)
+        return CameraConfig(
+            cameraId = rearCameraId,
+            rankedModes = rankedModes,
+            sensorOrientationDegrees = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
+        )
     }
+
+    private fun currentDisplayRotationDegrees(): Int =
+        when (textureView.display?.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
 
     private fun rankCaptureModes(candidates: List<CaptureModeCandidate>): List<CaptureMode> {
         val remaining = candidates.toMutableList()
@@ -392,8 +413,9 @@ class CameraCaptureController(
                                 vRowStride = vPlane.rowStride,
                                 vPixelStride = vPlane.pixelStride,
                             )
-                            val motionResult = detector.analyzeFrame(yuvFrame.toLumaFrame(), image.timestamp)
-                            autoTrackingState = tracker.update(yuvFrame, motionResult, launchZone)
+                            val mapper = coordinateMapper
+                            val motionResult = detector.analyzeFrame(yuvFrame.toLumaFrame(), image.timestamp, mapper)
+                            autoTrackingState = tracker.update(yuvFrame, motionResult, launchZone, mapper)
                             motionResult
                         } else {
                             null
@@ -464,7 +486,8 @@ class CameraCaptureController(
         val stillDebug = autoTrackingState?.acquisitionDebug?.statusSummary(aeAwbLocked = true) ?: "cal=n/a"
         val firstLumaLabel = firstLuma?.toString() ?: "n/a"
         emitStatusFromCallingThread(
-            "Camera " + mode.statusLabel() + " frames=" + frameCount +
+            "Camera " + mode.statusLabel() + " rot=" + coordinateMapper.rotationDegrees +
+                " frames=" + frameCount +
                 " fps=" + lastFps.formatFps() +
                 " y0=" + firstLumaLabel +
                 " candidates=" + candidateCount +
@@ -635,6 +658,7 @@ class CameraCaptureController(
     private data class CameraConfig(
         val cameraId: String,
         val rankedModes: List<CaptureMode>,
+        val sensorOrientationDegrees: Int,
     )
 
     private companion object {

@@ -54,7 +54,11 @@ class LumaMotionDetector(
 ) {
     private var previousFrame: LumaFrame? = null
 
-    fun analyzeFrame(frame: LumaFrame, timestampNs: Long): LumaMotionResult {
+    fun analyzeFrame(
+        frame: LumaFrame,
+        timestampNs: Long,
+        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
+    ): LumaMotionResult {
         val previous = previousFrame
         previousFrame = frame.copy(luma = frame.luma.copyOf())
 
@@ -104,7 +108,7 @@ class LumaMotionDetector(
                 continue
             }
 
-            candidates += component.toCandidate(frame)
+            candidates += component.toCandidate(frame, mapper)
         }
 
         return LumaMotionResult(
@@ -188,12 +192,16 @@ class LumaMotionDetector(
         queue.add(index)
     }
 
-    private fun Component.toCandidate(frame: LumaFrame): LumaMotionCandidate {
+    private fun Component.toCandidate(frame: LumaFrame, mapper: FrameCoordinateMapper): LumaMotionCandidate {
         val xDenominator = (frame.width - 1).coerceAtLeast(1).toDouble()
         val yDenominator = (frame.height - 1).coerceAtLeast(1).toDouble()
-        return LumaMotionCandidate(
+        val viewCentroid = mapper.frameToView(
             x = (xSum / pixelCount) / xDenominator,
             y = (ySum / pixelCount) / yDenominator,
+        )
+        return LumaMotionCandidate(
+            x = viewCentroid.x,
+            y = viewCentroid.y,
             pixelCount = pixelCount,
             confidence = (lumaSum / pixelCount) / 255.0,
         )

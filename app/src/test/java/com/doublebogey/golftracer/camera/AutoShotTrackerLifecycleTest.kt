@@ -118,6 +118,29 @@ class AutoShotTrackerLifecycleTest {
         assertEquals(true, stale.acquisitionDebug.backgroundStale)
     }
 
+    @Test
+    fun locksBallOnRotatedLandscapeFrameUsingPortraitZone() {
+        val mapper = FrameCoordinateMapper(90)
+        // Portrait view zone; maps to frame x in [0.25, 0.75], y in [0.25, 0.50].
+        val viewZone = LaunchZone(left = 0.50, top = 0.25, width = 0.25, height = 0.50)
+        val tracker = tracker()
+
+        tracker.update(landscapeMatFrame(), resultAt(0L), viewZone, mapper)
+        tracker.update(landscapeMatFrame(), resultAt(33L), viewZone, mapper)
+        tracker.update(landscapeBallFrame(), resultAt(66L), viewZone, mapper)
+        val locked = tracker.update(landscapeBallFrame(), resultAt(99L), viewZone, mapper)
+
+        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status)
+        val ball = assertNotNull(locked.lockedBall)
+        assertEquals(1.0 - 11.0 / 31.0, ball.x, absoluteTolerance = 0.03)
+        assertEquals(23.0 / 47.0, ball.y, absoluteTolerance = 0.03)
+    }
+
+    private fun landscapeMatFrame(): YuvFrame = emptyMatFrame(width = 48, height = 32)
+
+    private fun landscapeBallFrame(): YuvFrame =
+        landscapeMatFrame().withDisc(centerX = 23, centerY = 11, radius = 3, y = 170, u = 104, v = 136)
+
     private fun tracker(
         lostBallFrames: Int = 50,
         reviewHoldNs: Long = 4_000_000_000L,

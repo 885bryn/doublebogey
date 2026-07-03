@@ -53,7 +53,12 @@ class AutoShotTracker(
     private var reviewStartedNs = 0L
     private var lastAcquisitionDebug = ZoneBallDebug()
 
-    fun update(frame: YuvFrame, result: LumaMotionResult, launchZone: LaunchZone): AutoShotTrackerState {
+    fun update(
+        frame: YuvFrame,
+        result: LumaMotionResult,
+        launchZone: LaunchZone,
+        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
+    ): AutoShotTrackerState {
         if (activeLaunchZone != launchZone) {
             beginCalibration(launchZone, preserveDebug = false)
         }
@@ -70,7 +75,7 @@ class AutoShotTracker(
         }
 
         if (status == AutoShotTrackerStatus.Calibrating) {
-            return updateCalibration(frame, launchZone)
+            return updateCalibration(frame, launchZone, mapper)
         }
 
         if (status == AutoShotTrackerStatus.Tracking) {
@@ -83,7 +88,7 @@ class AutoShotTracker(
             return currentState()
         }
 
-        val stillDetection = detector.analyzeFrame(frame, launchZone)
+        val stillDetection = detector.analyzeFrame(frame, launchZone, mapper)
         lastAcquisitionDebug = stillDetection.debug
         if (stillDetection.debug.backgroundStale) {
             beginCalibration(launchZone, preserveDebug = true)
@@ -143,14 +148,18 @@ class AutoShotTracker(
         lastAcquisitionDebug = ZoneBallDebug()
     }
 
-    private fun updateCalibration(frame: YuvFrame, launchZone: LaunchZone): AutoShotTrackerState {
-        val motion = motionMeter.measure(frame, launchZone)
+    private fun updateCalibration(
+        frame: YuvFrame,
+        launchZone: LaunchZone,
+        mapper: FrameCoordinateMapper,
+    ): AutoShotTrackerState {
+        val motion = motionMeter.measure(frame, launchZone, mapper)
         if (!motion.quiet) {
             beginCalibration(launchZone, preserveDebug = false)
             return currentState()
         }
 
-        val detection = detector.collectCalibrationFrame(frame, launchZone)
+        val detection = detector.collectCalibrationFrame(frame, launchZone, mapper)
         lastAcquisitionDebug = detection.debug
         if (detector.calibrationState == ZoneBallCalibrationState.Calibrated) {
             status = AutoShotTrackerStatus.Searching
