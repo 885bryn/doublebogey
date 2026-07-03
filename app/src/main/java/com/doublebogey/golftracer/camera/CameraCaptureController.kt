@@ -29,6 +29,7 @@ class CameraCaptureController(
     // Detection results are delivered on the camera callback thread. The caller marshals to UI.
     private val onDetectionResult: (LumaMotionResult) -> Unit = {},
     private val onTrackingState: (ShotTrackerState) -> Unit = {},
+    private val onAutoTrackingState: (AutoShotTrackerState) -> Unit = {},
 ) {
     private val cameraManager: CameraManager =
         context.getSystemService(CameraManager::class.java)
@@ -437,6 +438,9 @@ class CameraCaptureController(
                         if (trackingState != null) {
                             maybeEmitTrackingState(image.timestamp, trackingState)
                         }
+                        if (autoTrackingState != null) {
+                            onAutoTrackingState(autoTrackingState)
+                        }
                         maybeEmitFrameStatus(mode, image.timestamp, firstLuma, detectionResult, autoTrackingState)
                     } finally {
                         image.close()
@@ -667,4 +671,5 @@ class CameraCaptureController(
         const val DETECTION_OVERLAY_INTERVAL_NS = 33_333_333L
     }
 }
+
 

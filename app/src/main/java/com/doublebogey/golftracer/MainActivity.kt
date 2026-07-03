@@ -149,6 +149,9 @@ class MainActivity : Activity() {
         val cameraStatusText = overlayText("Starting camera...").apply {
             gravity = Gravity.START
         }
+        val startingBadges = CameraStatusBadgeModel.starting()
+        val calibrationBadgeText = statusBadgeText(startingBadges.calibration)
+        val ballBadgeText = statusBadgeText(startingBadges.ball)
         val networkStatusText = overlayText("Starting network...").apply {
             gravity = Gravity.END
         }
@@ -182,6 +185,17 @@ class MainActivity : Activity() {
                     }
                 }
             },
+            onAutoTrackingState = { state ->
+                updateIfCurrent(screenGeneration) {
+                    val badges = CameraStatusBadgeModel.from(
+                        shotStatus = state.status,
+                        trackingState = state.trackingState,
+                        acquisitionDebug = state.acquisitionDebug,
+                    )
+                    calibrationBadgeText.applyBadge(badges.calibration)
+                    ballBadgeText.applyBadge(badges.ball)
+                }
+            },
         )
 
         activeNetworkController = networkController
@@ -207,6 +221,34 @@ class MainActivity : Activity() {
                 addView(
                     LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.VERTICAL
+                        addView(
+                            LinearLayout(this@MainActivity).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.START
+                                addView(
+                                    calibrationBadgeText,
+                                    LinearLayout.LayoutParams(
+                                        0,
+                                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                                        1f,
+                                    ),
+                                )
+                                addView(
+                                    ballBadgeText,
+                                    LinearLayout.LayoutParams(
+                                        0,
+                                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                                        1f,
+                                    ).apply {
+                                        leftMargin = 8.dp
+                                    },
+                                )
+                            },
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ),
+                        )
                         addView(
                             cameraStatusText,
                             LinearLayout.LayoutParams(
@@ -364,6 +406,28 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.argb(160, 0, 0, 0))
             setPadding(8.dp, 6.dp, 8.dp, 6.dp)
         }
+
+    private fun statusBadgeText(badge: CameraStatusBadge): TextView =
+        TextView(this).apply {
+            textSize = 18f
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(8.dp, 10.dp, 8.dp, 10.dp)
+            applyBadge(badge)
+        }
+
+    private fun TextView.applyBadge(badge: CameraStatusBadge) {
+        text = badge.text
+        setTextColor(Color.WHITE)
+        setBackgroundColor(
+            when (badge.tone) {
+                CameraStatusBadgeTone.Waiting -> Color.argb(220, 88, 88, 88)
+                CameraStatusBadgeTone.Ready -> Color.argb(230, 0, 132, 62)
+                CameraStatusBadgeTone.Detected -> Color.argb(230, 0, 116, 150)
+                CameraStatusBadgeTone.Warning -> Color.argb(235, 190, 72, 0)
+            },
+        )
+    }
 
     private fun updateIfCurrent(screenGeneration: Int, update: () -> Unit) {
         runOnUiThread {
