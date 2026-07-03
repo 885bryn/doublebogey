@@ -25,10 +25,16 @@ class CameraCaptureController(
     private val textureView: TextureView,
     // Status is delivered on the calling callback thread. Task 6's caller will marshal to UI.
     private val onStatus: (String) -> Unit,
+    private val launchZoneProvider: () -> LaunchZone = { LaunchZone.Default },
+    // Detection results are delivered on the camera callback thread. The caller marshals to UI.
+    private val onDetectionResult: (LumaMotionResult) -> Unit = {},
+    private val onTrackingState: (ShotTrackerState) -> Unit = {},
 ) {
     private val cameraManager: CameraManager =
         context.getSystemService(CameraManager::class.java)
     private val fpsCounter = FpsCounter()
+    private val detector = LumaMotionDetector()
+    private val tracker = AutoShotTracker()
     private val cameraCallbackHandler = Handler(Looper.getMainLooper())
 
     private var backgroundThread: HandlerThread? = null
@@ -43,6 +49,7 @@ class CameraCaptureController(
     private var frameCount = 0L
     private var lastFps = 0.0
     private var lastStatusTimestampNs = 0L
+    private var lastDetectionOverlayTimestampNs = 0L
 
     @Volatile
     private var readerGeneration = 0
@@ -90,6 +97,12 @@ class CameraCaptureController(
         } else {
             emitStatusFromCallingThread("Waiting for camera preview surface")
         }
+    }
+
+    fun resetShotReview() {
+        val state = tracker.resetForNextShot()
+        onTrackingState(state.trackingState)
+        emitStatusFromCallingThread("Shot review cleared; calibrating empty launch zone")
     }
 
     fun stop() {
@@ -349,17 +362,60 @@ class CameraCaptureController(
                             return@setOnImageAvailableListener
                         }
 
-                        val yPlane = image.planes.firstOrNull()
+                        val yPlane = image.planes.getOrNull(0)
+                        val uPlane = image.planes.getOrNull(1)
+                        val vPlane = image.planes.getOrNull(2)
                         val yBuffer = yPlane?.buffer
+                        val uBuffer = uPlane?.buffer
+                        val vBuffer = vPlane?.buffer
                         val firstLuma = if (yBuffer != null && yBuffer.remaining() > 0) {
                             yBuffer.get(0).toInt() and 0xFF
                         } else {
                             null
                         }
+                        val launchZone = launchZoneProvider()
+                        var autoTrackingState: AutoShotTrackerState? = null
+                        val detectionResult = if (
+                            yPlane != null && uPlane != null && vPlane != null &&
+                            yBuffer != null && uBuffer != null && vBuffer != null
+                        ) {
+                            val yuvFrame = YuvFrameExtractor.extract(
+                                yBuffer = yBuffer,
+                                uBuffer = uBuffer,
+                                vBuffer = vBuffer,
+                                width = image.width,
+                                height = image.height,
+                                yRowStride = yPlane.rowStride,
+                                yPixelStride = yPlane.pixelStride,
+                                uRowStride = uPlane.rowStride,
+                                uPixelStride = uPlane.pixelStride,
+                                vRowStride = vPlane.rowStride,
+                                vPixelStride = vPlane.pixelStride,
+                            )
+                            val motionResult = detector.analyzeFrame(yuvFrame.toLumaFrame(), image.timestamp)
+                            autoTrackingState = tracker.update(yuvFrame, motionResult, launchZone)
+                            motionResult
+                        } else {
+                            null
+                        }
+                        val trackingState = autoTrackingState?.trackingState
+                        val visibleDetectionResult = detectionResult?.copy(
+                            candidates = DetectionDebugFilter.visibleCandidates(
+                                trackerState = autoTrackingState,
+                                launchZone = launchZone,
+                                trackingState = trackingState,
+                            ),
+                        )
 
                         frameCount += 1
                         lastFps = fpsCounter.recordFrame(image.timestamp)
-                        maybeEmitFrameStatus(mode, image.timestamp, firstLuma)
+                        if (visibleDetectionResult != null) {
+                            maybeEmitDetectionResult(image.timestamp, visibleDetectionResult)
+                        }
+                        if (trackingState != null) {
+                            maybeEmitTrackingState(image.timestamp, trackingState)
+                        }
+                        maybeEmitFrameStatus(mode, image.timestamp, firstLuma, detectionResult, autoTrackingState)
                     } finally {
                         image.close()
                     }
@@ -368,14 +424,56 @@ class CameraCaptureController(
             )
         }
 
-    private fun maybeEmitFrameStatus(mode: CaptureMode, timestampNs: Long, firstLuma: Int?) {
+
+    private fun maybeEmitDetectionResult(timestampNs: Long, result: LumaMotionResult) {
+        if (lastDetectionOverlayTimestampNs != 0L && timestampNs - lastDetectionOverlayTimestampNs < DETECTION_OVERLAY_INTERVAL_NS) {
+            return
+        }
+
+        lastDetectionOverlayTimestampNs = timestampNs
+        onDetectionResult(result)
+    }
+
+    private fun maybeEmitTrackingState(timestampNs: Long, state: ShotTrackerState) {
+        if (lastDetectionOverlayTimestampNs != timestampNs) {
+            return
+        }
+
+        onTrackingState(state)
+    }
+
+    private fun maybeEmitFrameStatus(
+        mode: CaptureMode,
+        timestampNs: Long,
+        firstLuma: Int?,
+        detectionResult: LumaMotionResult?,
+        autoTrackingState: AutoShotTrackerState?,
+    ) {
         if (lastStatusTimestampNs != 0L && timestampNs - lastStatusTimestampNs < STATUS_INTERVAL_NS) {
             return
         }
 
         lastStatusTimestampNs = timestampNs
+        val candidateCount = detectionResult?.candidates?.size ?: 0
+        val stillCandidateCount = autoTrackingState?.acquisitionDebug?.candidates?.size ?: 0
+        val matchedPixels = detectionResult?.matchedPixels ?: 0
+        val trackingState = autoTrackingState?.trackingState
+        val trackingLabel = trackingState?.status ?: ShotTrackerStatus.Idle
+        val trackPointCount = trackingState?.points?.size ?: 0
+        val shotLabel = autoTrackingState?.status ?: tracker.status
+        val stillDebug = autoTrackingState?.acquisitionDebug?.statusSummary(aeAwbLocked = true) ?: "cal=n/a"
+        val firstLumaLabel = firstLuma?.toString() ?: "n/a"
         emitStatusFromCallingThread(
-            "Camera ${mode.statusLabel()} frames=$frameCount fps=${lastFps.formatFps()} y0=${firstLuma ?: "n/a"}",
+            "Camera " + mode.statusLabel() + " frames=" + frameCount +
+                " fps=" + lastFps.formatFps() +
+                " y0=" + firstLumaLabel +
+                " candidates=" + candidateCount +
+                " still=" + stillCandidateCount +
+                " matched=" + matchedPixels +
+                " shot=" + shotLabel +
+                " track=" + trackingLabel +
+                " points=" + trackPointCount +
+                " ball={" + stillDebug + "}",
         )
     }
 
@@ -436,6 +534,8 @@ class CameraCaptureController(
                 addTarget(preview)
                 addTarget(analysis)
                 set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(mode.minFps, mode.maxFps))
+                set(CaptureRequest.CONTROL_AE_LOCK, true)
+                set(CaptureRequest.CONTROL_AWB_LOCK, true)
             }.build()
 
             session.setRepeatingRequest(request, null, backgroundHandler)
@@ -508,7 +608,10 @@ class CameraCaptureController(
         frameCount = 0L
         lastFps = 0.0
         lastStatusTimestampNs = 0L
+        lastDetectionOverlayTimestampNs = 0L
         fpsCounter.reset()
+        detector.reset()
+        tracker.reset()
     }
 
     private fun isCurrent(callbackGeneration: Int): Boolean = started && generation == callbackGeneration
@@ -537,5 +640,7 @@ class CameraCaptureController(
     private companion object {
         const val MAX_IMAGES = 3
         const val STATUS_INTERVAL_NS = 1_000_000_000L
+        const val DETECTION_OVERLAY_INTERVAL_NS = 33_333_333L
     }
 }
+

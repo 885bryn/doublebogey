@@ -22,6 +22,18 @@ class LaunchZoneOverlayView @JvmOverloads constructor(
             }
         }
 
+    var detectionCandidates: List<LumaMotionCandidate> = emptyList()
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    var trackPoints: List<ShotTrackPoint> = emptyList()
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     var onLaunchZoneChanged: ((LaunchZone) -> Unit)? = null
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -33,6 +45,33 @@ class LaunchZoneOverlayView @JvmOverloads constructor(
         color = Color.GREEN
         style = Paint.Style.STROKE
         strokeWidth = 4f
+    }
+
+    private val candidatePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.CYAN
+        style = Paint.Style.FILL
+    }
+
+    private val candidateStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+
+    private val trackLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.YELLOW
+        style = Paint.Style.STROKE
+        strokeWidth = 5f
+    }
+
+    private val observedTrackPointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.YELLOW
+        style = Paint.Style.FILL
+    }
+
+    private val predictedTrackPointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.MAGENTA
+        style = Paint.Style.FILL
     }
 
     private val zoneRect = RectF()
@@ -51,6 +90,39 @@ class LaunchZoneOverlayView @JvmOverloads constructor(
 
         canvas.drawRect(zoneRect, fillPaint)
         canvas.drawRect(zoneRect, strokePaint)
+
+        drawTrack(canvas)
+
+        for (candidate in detectionCandidates) {
+            val cx = (candidate.x * width).toFloat()
+            val cy = (candidate.y * height).toFloat()
+            canvas.drawCircle(cx, cy, CANDIDATE_RADIUS_PX, candidatePaint)
+            canvas.drawCircle(cx, cy, CANDIDATE_RADIUS_PX, candidateStrokePaint)
+        }
+    }
+
+    private fun drawTrack(canvas: Canvas) {
+        for (index in 1 until trackPoints.size) {
+            val previous = trackPoints[index - 1]
+            val current = trackPoints[index]
+            canvas.drawLine(
+                (previous.x * width).toFloat(),
+                (previous.y * height).toFloat(),
+                (current.x * width).toFloat(),
+                (current.y * height).toFloat(),
+                trackLinePaint,
+            )
+        }
+
+        for (point in trackPoints) {
+            val paint = if (point.predicted) predictedTrackPointPaint else observedTrackPointPaint
+            canvas.drawCircle(
+                (point.x * width).toFloat(),
+                (point.y * height).toFloat(),
+                TRACK_POINT_RADIUS_PX,
+                paint,
+            )
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -81,5 +153,10 @@ class LaunchZoneOverlayView @JvmOverloads constructor(
 
             else -> super.onTouchEvent(event)
         }
+    }
+
+    private companion object {
+        const val CANDIDATE_RADIUS_PX = 8f
+        const val TRACK_POINT_RADIUS_PX = 6f
     }
 }

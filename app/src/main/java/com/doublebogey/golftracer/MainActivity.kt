@@ -157,11 +157,32 @@ class MainActivity : Activity() {
                 networkStatusText.text = status
             }
         }
-        val cameraController = CameraCaptureController(this, textureView) { status ->
-            updateIfCurrent(screenGeneration) {
-                cameraStatusText.text = status
-            }
-        }
+        val cameraController = CameraCaptureController(
+            context = this,
+            textureView = textureView,
+            onStatus = { status ->
+                updateIfCurrent(screenGeneration) {
+                    cameraStatusText.text = status
+                }
+            },
+            launchZoneProvider = {
+                overlayView.launchZone
+            },
+            onDetectionResult = { result ->
+                updateIfCurrent(screenGeneration) {
+                    overlayView.detectionCandidates = result.candidates
+                }
+            },
+            onTrackingState = { state ->
+                updateIfCurrent(screenGeneration) {
+                    overlayView.trackPoints = if (state.points.isNotEmpty()) {
+                        state.points
+                    } else {
+                        emptyList()
+                    }
+                }
+            },
+        )
 
         activeNetworkController = networkController
         activeCameraController = cameraController
@@ -222,6 +243,23 @@ class MainActivity : Activity() {
                         FrameLayout.LayoutParams.WRAP_CONTENT,
                         FrameLayout.LayoutParams.WRAP_CONTENT,
                         Gravity.BOTTOM or Gravity.START,
+                    ).apply {
+                        setMargins(12.dp, 12.dp, 12.dp, 12.dp)
+                    },
+                )
+                addView(
+                    Button(this@MainActivity).apply {
+                        text = "Calibrate mat"
+                        setOnClickListener {
+                            overlayView.detectionCandidates = emptyList()
+                            overlayView.trackPoints = emptyList()
+                            activeCameraController?.resetShotReview()
+                        }
+                    },
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
                     ).apply {
                         setMargins(12.dp, 12.dp, 12.dp, 12.dp)
                     },
