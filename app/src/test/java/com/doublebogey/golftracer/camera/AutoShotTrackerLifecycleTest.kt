@@ -9,11 +9,7 @@ class AutoShotTrackerLifecycleTest {
     private val zone = LaunchZone(left = 0.0, top = 0.60, width = 1.0, height = 0.40)
     private val detectorConfig = ZoneBallDetectorConfig(
         calibrationFramesRequired = 2,
-        minYDelta = 18.0,
-        significanceMultiplier = 4.0,
-        minMeanSignificance = 6.0,
-        minArea = 6,
-        maxArea = 200,
+        lockThreshold = 8.0,
     )
 
     @Test
@@ -40,12 +36,12 @@ class AutoShotTrackerLifecycleTest {
 
         tracker.update(
             emptyMatFrame(),
-            resultAt(165L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.42))),
+            resultAt(165L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.24))),
             zone,
         )
         val reviewing = tracker.update(emptyMatFrame(), resultAt(198L), zone)
 
-        assertEquals(AutoShotTrackerStatus.Reviewing, reviewing.status)
+        assertEquals(AutoShotTrackerStatus.Reviewing, reviewing.status, reviewing.toString())
         assertTrue(reviewing.trackingState.points.isNotEmpty())
 
         val rearmed = tracker.update(emptyMatFrame(), resultAt(331L), zone)
@@ -107,21 +103,20 @@ class AutoShotTrackerLifecycleTest {
     }
 
     @Test
-    fun staleBackgroundReturnsToCalibration() {
+    fun globalLumaShiftDoesNotForceBackgroundRecalibration() {
         val tracker = tracker()
         tracker.update(emptyMatFrame(), resultAt(0L), zone)
         tracker.update(emptyMatFrame(), resultAt(33L), zone)
 
-        val stale = tracker.update(emptyMatFrame(globalYShift = 25), resultAt(66L), zone)
+        val shifted = tracker.update(emptyMatFrame(globalYShift = 25), resultAt(66L), zone)
 
-        assertEquals(AutoShotTrackerStatus.Calibrating, stale.status)
-        assertEquals(true, stale.acquisitionDebug.backgroundStale)
+        assertEquals(AutoShotTrackerStatus.Searching, shifted.status)
+        assertEquals(false, shifted.acquisitionDebug.backgroundStale)
     }
 
     @Test
     fun locksBallOnRotatedLandscapeFrameUsingPortraitZone() {
         val mapper = FrameCoordinateMapper(90)
-        // Portrait view zone; maps to frame x in [0.25, 0.75], y in [0.25, 0.50].
         val viewZone = LaunchZone(left = 0.50, top = 0.25, width = 0.25, height = 0.50)
         val tracker = tracker()
 
@@ -130,10 +125,73 @@ class AutoShotTrackerLifecycleTest {
         tracker.update(landscapeBallFrame(), resultAt(66L), viewZone, mapper)
         val locked = tracker.update(landscapeBallFrame(), resultAt(99L), viewZone, mapper)
 
-        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status)
+        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status, locked.acquisitionDebug.statusSummary())
         val ball = assertNotNull(locked.lockedBall)
         assertEquals(1.0 - 11.0 / 31.0, ball.x, absoluteTolerance = 0.03)
         assertEquals(23.0 / 47.0, ball.y, absoluteTolerance = 0.03)
+    }
+
+    @Test
+    fun croppedLaunchZoneAcquisitionReportsFullViewCoordinates() {
+        val mapper = FrameCoordinateMapper(90)
+        val viewZone = LaunchZone(left = 0.50, top = 0.25, width = 0.25, height = 0.50)
+        val tracker = tracker()
+        val sourceWidth = 480
+        val sourceHeight = 320
+        val cropLeft = 120
+        val cropTop = 80
+        val cropWidth = 240
+        val cropHeight = 80
+        val matFrame = emptyMatFrame(width = sourceWidth, height = sourceHeight)
+        val ballFrame = matFrame.withDisc(centerX = 240, centerY = 120, radius = 4, y = 170, u = 104, v = 136)
+
+        tracker.updateFromLaunchZoneCrop(
+            zoneFrame = matFrame.crop(cropLeft, cropTop, cropWidth, cropHeight),
+            result = resultAt(0L),
+            launchZone = viewZone,
+            mapper = mapper,
+            cropLeftPx = cropLeft,
+            cropTopPx = cropTop,
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+        )
+        tracker.updateFromLaunchZoneCrop(
+            zoneFrame = matFrame.crop(cropLeft, cropTop, cropWidth, cropHeight),
+            result = resultAt(33L),
+            launchZone = viewZone,
+            mapper = mapper,
+            cropLeftPx = cropLeft,
+            cropTopPx = cropTop,
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+        )
+        var locked = tracker.updateFromLaunchZoneCrop(
+            zoneFrame = ballFrame.crop(cropLeft, cropTop, cropWidth, cropHeight),
+            result = resultAt(66L),
+            launchZone = viewZone,
+            mapper = mapper,
+            cropLeftPx = cropLeft,
+            cropTopPx = cropTop,
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+        )
+        repeat(8) { index ->
+            locked = tracker.updateFromLaunchZoneCrop(
+                zoneFrame = ballFrame.crop(cropLeft, cropTop, cropWidth, cropHeight),
+                result = resultAt(99L + index * 33L),
+                launchZone = viewZone,
+                mapper = mapper,
+                cropLeftPx = cropLeft,
+                cropTopPx = cropTop,
+                sourceWidth = sourceWidth,
+                sourceHeight = sourceHeight,
+            )
+        }
+
+        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status, locked.acquisitionDebug.statusSummary())
+        val ball = assertNotNull(locked.lockedBall)
+        assertEquals(1.0 - 120.0 / 319.0, ball.x, absoluteTolerance = 0.03)
+        assertEquals(240.0 / 479.0, ball.y, absoluteTolerance = 0.03)
     }
 
     private fun landscapeMatFrame(): YuvFrame = emptyMatFrame(width = 48, height = 32)
@@ -202,6 +260,23 @@ class AutoShotTrackerLifecycleTest {
             }
         }
         return YuvFrame(width = width, height = height, y = y, u = u, v = v)
+    }
+
+    private fun YuvFrame.crop(left: Int, top: Int, cropWidth: Int, cropHeight: Int): YuvFrame {
+        val nextY = ByteArray(cropWidth * cropHeight)
+        val nextU = ByteArray(cropWidth * cropHeight)
+        val nextV = ByteArray(cropWidth * cropHeight)
+        var outputIndex = 0
+        for (row in 0 until cropHeight) {
+            for (column in 0 until cropWidth) {
+                val sourceIndex = (top + row) * width + left + column
+                nextY[outputIndex] = y[sourceIndex]
+                nextU[outputIndex] = u[sourceIndex]
+                nextV[outputIndex] = v[sourceIndex]
+                outputIndex += 1
+            }
+        }
+        return YuvFrame(width = cropWidth, height = cropHeight, y = nextY, u = nextU, v = nextV)
     }
 
     private fun YuvFrame.withDisc(centerX: Int, centerY: Int, radius: Int, y: Int, u: Int, v: Int): YuvFrame {

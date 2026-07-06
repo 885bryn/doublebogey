@@ -1,5 +1,13 @@
 # Auto Ball Acquisition Handoff
 
+> **2026-07-05 update:** the calibrated-background detector below false-locked at the driving
+> range (6 px speck; real ball produced no candidate). An interim patch lives on
+> `codex-surface-agnostic-ball-detection` (minArea 6→20, abs(dY) foreground, dark-chroma guard),
+> but the detection approach is being replaced — see
+> `docs/superpowers/specs/2026-07-05-surface-agnostic-acquisition-and-tracking.md`. The "Next
+> Work" list below is superseded by that spec's Phase 1–5 plan; do not invest further in
+> background-model tuning or paired empty-mat/ball calibration imagery.
+
 Branch: `codex-auto-ball-acquisition-redesign`
 
 ## Current State

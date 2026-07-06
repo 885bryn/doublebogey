@@ -1,9 +1,14 @@
 package com.doublebogey.golftracer.camera
 
 import java.util.Locale
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 enum class ZoneBallCalibrationState {
@@ -13,30 +18,34 @@ enum class ZoneBallCalibrationState {
 }
 
 data class ZoneBallDetectorConfig(
-    val calibrationFramesRequired: Int = 30,
-    val minYDelta: Double = 18.0,
-    val significanceMultiplier: Double = 4.0,
-    val minMeanSignificance: Double = 6.0,
-    val minArea: Int = 6,
-    val maxArea: Int = 4000,
-    val minFillRatio: Double = 0.45,
-    val minAspectRatio: Double = 0.50,
+    val calibrationFramesRequired: Int = 1,
+    val assumedZoneWidthMm: Double = 1500.0,
+    val ballDiameterMm: Double = 42.7,
+    val minAnnulusContrast: Double = 2.5,
+    val maxInteriorUniformity: Double = 0.95,
+    val minEdgeCircularity: Double = 0.45,
     val chromaShiftTolerance: Double = 45.0,
-    val staleForegroundFraction: Double = 0.35,
     val runnerUpMargin: Double = 1.5,
+    val persistenceDecay: Double = 0.90,
+    val lockThreshold: Double = 12.0,
+    val maxMissedLockFrames: Int = 2,
+    val maxCandidatesPerFrame: Int = 8,
+    val sigmaFloor: Double = 6.0,
 ) {
     init {
         require(calibrationFramesRequired > 0) { "calibrationFramesRequired must be greater than 0" }
-        require(minYDelta >= 0.0) { "minYDelta must not be negative" }
-        require(significanceMultiplier > 0.0) { "significanceMultiplier must be greater than 0" }
-        require(minMeanSignificance > 0.0) { "minMeanSignificance must be greater than 0" }
-        require(minArea > 0) { "minArea must be greater than 0" }
-        require(maxArea >= minArea) { "maxArea must be at least minArea" }
-        require(minFillRatio in 0.0..1.0) { "minFillRatio must be in 0..1" }
-        require(minAspectRatio in 0.0..1.0) { "minAspectRatio must be in 0..1" }
+        require(assumedZoneWidthMm > 0.0) { "assumedZoneWidthMm must be greater than 0" }
+        require(ballDiameterMm > 0.0) { "ballDiameterMm must be greater than 0" }
+        require(minAnnulusContrast >= 0.0) { "minAnnulusContrast must not be negative" }
+        require(maxInteriorUniformity >= 0.0) { "maxInteriorUniformity must not be negative" }
+        require(minEdgeCircularity in 0.0..1.0) { "minEdgeCircularity must be in 0..1" }
         require(chromaShiftTolerance >= 0.0) { "chromaShiftTolerance must not be negative" }
-        require(staleForegroundFraction in 0.0..1.0) { "staleForegroundFraction must be in 0..1" }
         require(runnerUpMargin >= 1.0) { "runnerUpMargin must be at least 1" }
+        require(persistenceDecay in 0.0..1.0) { "persistenceDecay must be in 0..1" }
+        require(lockThreshold > 0.0) { "lockThreshold must be greater than 0" }
+        require(maxMissedLockFrames > 0) { "maxMissedLockFrames must be greater than 0" }
+        require(maxCandidatesPerFrame > 0) { "maxCandidatesPerFrame must be greater than 0" }
+        require(sigmaFloor > 0.0) { "sigmaFloor must be greater than 0" }
     }
 }
 
@@ -48,6 +57,12 @@ data class ZoneBallCandidateDebug(
     val meanSignificance: Double,
     val chromaShift: Double,
     val rankScore: Double,
+    val meanYDelta: Double = 0.0,
+    val radiusPx: Double = 0.0,
+    val annulusContrast: Double = meanSignificance,
+    val interiorUniformity: Double = 0.0,
+    val edgeCircularity: Double = fillRatio,
+    val persistenceScore: Double = 0.0,
 )
 
 data class ZoneBallDebug(
@@ -63,20 +78,18 @@ data class ZoneBallDebug(
     val rejectedBySignificance: Int = 0,
     val rejectedByChroma: Int = 0,
     val margin: Double = 0.0,
+    val expectedRadiusPx: Double = 0.0,
+    val lockThreshold: Double = 0.0,
+    val leadingPersistence: Double = 0.0,
 ) {
     val best: ZoneBallCandidateDebug?
         get() = candidates.firstOrNull()
 
     fun statusSummary(aeAwbLocked: Boolean = false): String {
-        val calLabel = when (calibrationState) {
-            ZoneBallCalibrationState.Uncalibrated -> "None"
-            ZoneBallCalibrationState.Calibrating -> "Calibrating ${calibrationFramesCollected}/${calibrationFramesRequired}"
-            ZoneBallCalibrationState.Calibrated -> "OK"
-        }
         val bestSummary = best?.let { candidate ->
-            "best={s=${candidate.meanSignificance.format1()} area=${candidate.area} fill=${candidate.fillRatio.format2()} asp=${candidate.aspectRatio.format2()} dc=${candidate.chromaShift.format1()}}"
+            "best={q=${candidate.rankScore.format1()} C=${candidate.annulusContrast.format1()} E=${candidate.edgeCircularity.format2()} U=${candidate.interiorUniformity.format2()} r=${candidate.radiusPx.format1()}}"
         } ?: "best=none"
-        return "cal=$calLabel sigma=${medianSigmaY.format1()} aeLock=${if (aeAwbLocked) 1 else 0} fg=${(foregroundFraction * 100.0).format1()}% $bestSummary margin=${margin.format2()}"
+        return "shot=Searching r_e=${expectedRadiusPx.format1()} cand=${candidates.size} $bestSummary persist=${leadingPersistence.format1()}/${lockThreshold.format1()} margin=${margin.format2()} aeLock=${if (aeAwbLocked) 1 else 0}"
     }
 
     private fun Double.format1(): String = String.format(Locale.US, "%.1f", this)
@@ -94,23 +107,19 @@ class ZoneBallDetector(
     var calibrationState: ZoneBallCalibrationState = ZoneBallCalibrationState.Uncalibrated
         private set
 
-    private var calibrationFrameCount = 0
-    private var calibrationZone: LaunchZone? = null
-    private var sumY: LongArray? = null
-    private var sumU: LongArray? = null
-    private var sumV: LongArray? = null
-    private var sumSqY: LongArray? = null
-    private var model: ZoneBackgroundModel? = null
+    private var warmupFrameCount = 0
+    private var activeLaunchZone: LaunchZone? = null
+    private var activeFrameSize: Pair<Int, Int>? = null
+    private val accumulators = mutableMapOf<CellKey, Accumulator>()
+    private var lockedKey: CellKey? = null
+    private var lockedCandidate: LumaMotionCandidate? = null
+    private var missedLockFrames = 0
 
     fun startCalibration(launchZone: LaunchZone) {
         calibrationState = ZoneBallCalibrationState.Calibrating
-        calibrationFrameCount = 0
-        calibrationZone = launchZone
-        sumY = null
-        sumU = null
-        sumV = null
-        sumSqY = null
-        model = null
+        warmupFrameCount = 0
+        activeLaunchZone = launchZone
+        resetTrackingState()
     }
 
     fun collectCalibrationFrame(
@@ -118,33 +127,17 @@ class ZoneBallDetector(
         launchZone: LaunchZone,
         mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
     ): ZoneBallDetection {
-        if (calibrationState != ZoneBallCalibrationState.Calibrating || calibrationZone != launchZone) {
+        if (calibrationState != ZoneBallCalibrationState.Calibrating || activeLaunchZone != launchZone) {
             startCalibration(launchZone)
         }
-        ensureCalibrationBuffers(frame)
-        val bounds = mapper.viewZoneToFrameZone(launchZone).bounds(frame)
-        val ySum = requireNotNull(sumY)
-        val uSum = requireNotNull(sumU)
-        val vSum = requireNotNull(sumV)
-        val ySqSum = requireNotNull(sumSqY)
-
-        for (row in bounds.top..bounds.bottom) {
-            for (column in bounds.left..bounds.right) {
-                val index = row * frame.width + column
-                val y = frame.y[index].unsigned()
-                ySum[index] += y.toLong()
-                uSum[index] += frame.u[index].unsigned().toLong()
-                vSum[index] += frame.v[index].unsigned().toLong()
-                ySqSum[index] += y.toLong() * y.toLong()
-            }
-        }
-
-        calibrationFrameCount += 1
-        if (calibrationFrameCount >= config.calibrationFramesRequired) {
-            model = buildModel(frame, bounds)
+        warmupFrameCount += 1
+        if (warmupFrameCount >= config.calibrationFramesRequired) {
             calibrationState = ZoneBallCalibrationState.Calibrated
         }
-        return ZoneBallDetection(acceptedCandidate = null, debug = debug())
+        return ZoneBallDetection(
+            acceptedCandidate = null,
+            debug = debug(expectedRadiusPx = expectedRadius(mapper.viewZoneToFrameZone(launchZone).bounds(frame))),
+        )
     }
 
     fun analyzeFrame(
@@ -152,317 +145,299 @@ class ZoneBallDetector(
         launchZone: LaunchZone,
         mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
     ): ZoneBallDetection {
-        val background = model
-        if (calibrationState != ZoneBallCalibrationState.Calibrated || background == null) {
-            return ZoneBallDetection(acceptedCandidate = null, debug = debug())
-        }
-        if (!background.matches(frame, launchZone)) {
-            reset()
-            return ZoneBallDetection(acceptedCandidate = null, debug = debug())
+        ensureActiveFrame(frame, launchZone)
+        if (calibrationState == ZoneBallCalibrationState.Uncalibrated) {
+            calibrationState = ZoneBallCalibrationState.Calibrated
+            warmupFrameCount = config.calibrationFramesRequired
         }
 
-        val foreground = buildForegroundMask(frame, background)
-        val foregroundFraction = foreground.count.toDouble() / background.bounds.area.toDouble()
-        if (foregroundFraction > config.staleForegroundFraction) {
-            return ZoneBallDetection(
-                acceptedCandidate = null,
-                debug = debug(
-                    foregroundFraction = foregroundFraction,
-                    backgroundStale = true,
-                ),
-            )
+        val frameZone = mapper.viewZoneToFrameZone(launchZone)
+        val bounds = frameZone.bounds(frame)
+        val expectedRadius = expectedRadius(bounds)
+        val proposals = proposeCandidates(frame, bounds, mapper, expectedRadius)
+        val ranked = proposals.map { it.debug }.sortedByDescending { it.rankScore }
+        decayAccumulators()
+        for (proposal in proposals) {
+            val key = proposal.cellKey(expectedRadius)
+            val accumulator = accumulators.getOrPut(key) { Accumulator(key = key) }
+            accumulator.score += proposal.debug.rankScore
+            accumulator.candidate = proposal.debug.candidate
+            accumulator.debug = proposal.debug
         }
 
-        val components = findComponents(frame, background, foreground.mask)
-        val ranked = mutableListOf<ZoneBallCandidateDebug>()
-        var rejectedBySize = 0
-        var rejectedByShape = 0
-        var rejectedBySignificance = 0
-        var rejectedByChroma = 0
-
-        for (component in components) {
-            if (component.pixelIndices.size !in config.minArea..config.maxArea) {
-                rejectedBySize += 1
-                continue
-            }
-            val candidate = component.toCandidate(frame, background, mapper)
-            if (candidate.aspectRatio < config.minAspectRatio || candidate.fillRatio < config.minFillRatio) {
-                rejectedByShape += 1
-                continue
-            }
-            if (candidate.meanSignificance < config.minMeanSignificance) {
-                rejectedBySignificance += 1
-                continue
-            }
-            if (candidate.chromaShift > config.chromaShiftTolerance) {
-                rejectedByChroma += 1
-                continue
-            }
-            ranked += candidate
-        }
-
-        val candidates = ranked.sortedByDescending { it.rankScore }
-        val best = candidates.firstOrNull()
-        val runnerUp = candidates.getOrNull(1)
+        val locked = updateLock(proposals, expectedRadius, frame)
+        val leaders = accumulators.values.sortedByDescending { it.score }
+        val leader = leaders.firstOrNull()
+        val runnerUp = leaders.getOrNull(1)
         val margin = when {
-            best == null -> 0.0
-            runnerUp == null || runnerUp.rankScore == 0.0 -> Double.POSITIVE_INFINITY
-            else -> best.rankScore / runnerUp.rankScore
+            leader == null -> 0.0
+            runnerUp == null || runnerUp.score == 0.0 -> Double.POSITIVE_INFINITY
+            else -> leader.score / runnerUp.score
         }
-        val accepted = best?.takeIf { runnerUp == null || margin >= config.runnerUpMargin }?.candidate
+        if (lockedKey == null && leader != null && leader.score >= config.lockThreshold && margin >= config.runnerUpMargin) {
+            lockedKey = leader.key
+            lockedCandidate = leader.candidate
+            missedLockFrames = 0
+        }
+
+        val accepted = when {
+            locked != null -> locked
+            lockedKey != null && leader?.key == lockedKey && proposals.any { it.cellKey(expectedRadius) == lockedKey } -> leader?.candidate
+            else -> null
+        }
+        val candidates = ranked.take(3).map { candidate ->
+            val score = proposals.firstOrNull { it.debug === candidate }
+                ?.cellKey(expectedRadius)
+                ?.let { accumulators[it]?.score }
+                ?: 0.0
+            candidate.copy(persistenceScore = score)
+        }
 
         return ZoneBallDetection(
             acceptedCandidate = accepted,
             debug = debug(
-                foregroundFraction = foregroundFraction,
-                candidates = candidates.take(3),
-                rejectedBySize = rejectedBySize,
-                rejectedByShape = rejectedByShape,
-                rejectedBySignificance = rejectedBySignificance,
-                rejectedByChroma = rejectedByChroma,
+                candidates = candidates,
                 margin = margin,
+                expectedRadiusPx = expectedRadius,
+                leadingPersistence = leader?.score ?: 0.0,
             ),
         )
     }
 
     fun reset() {
         calibrationState = ZoneBallCalibrationState.Uncalibrated
-        calibrationFrameCount = 0
-        calibrationZone = null
-        sumY = null
-        sumU = null
-        sumV = null
-        sumSqY = null
-        model = null
+        warmupFrameCount = 0
+        activeLaunchZone = null
+        activeFrameSize = null
+        resetTrackingState()
     }
 
-    private fun ensureCalibrationBuffers(frame: YuvFrame) {
-        val size = frame.width * frame.height
-        if (sumY?.size == size) return
-        sumY = LongArray(size)
-        sumU = LongArray(size)
-        sumV = LongArray(size)
-        sumSqY = LongArray(size)
-        calibrationFrameCount = 0
+    private fun ensureActiveFrame(frame: YuvFrame, launchZone: LaunchZone) {
+        val frameSize = frame.width to frame.height
+        if (activeFrameSize == frameSize && activeLaunchZone == launchZone) return
+        activeFrameSize = frameSize
+        activeLaunchZone = launchZone
+        resetTrackingState()
     }
 
-    private fun buildModel(frame: YuvFrame, bounds: PixelBounds): ZoneBackgroundModel {
-        val ySum = requireNotNull(sumY)
-        val uSum = requireNotNull(sumU)
-        val vSum = requireNotNull(sumV)
-        val ySqSum = requireNotNull(sumSqY)
-        val size = frame.width * frame.height
-        val meanY = DoubleArray(size)
-        val meanU = DoubleArray(size)
-        val meanV = DoubleArray(size)
-        val sigmaY = DoubleArray(size) { MIN_SIGMA_Y }
-        val zoneSigmas = mutableListOf<Double>()
-
-        for (row in bounds.top..bounds.bottom) {
-            for (column in bounds.left..bounds.right) {
-                val index = row * frame.width + column
-                val mean = ySum[index].toDouble() / calibrationFrameCount.toDouble()
-                val meanSq = ySqSum[index].toDouble() / calibrationFrameCount.toDouble()
-                val variance = (meanSq - mean * mean).coerceAtLeast(0.0)
-                val sigma = sqrt(variance).coerceIn(MIN_SIGMA_Y, MAX_SIGMA_Y)
-                meanY[index] = mean
-                meanU[index] = uSum[index].toDouble() / calibrationFrameCount.toDouble()
-                meanV[index] = vSum[index].toDouble() / calibrationFrameCount.toDouble()
-                sigmaY[index] = sigma
-                zoneSigmas += sigma
-            }
-        }
-
-        return ZoneBackgroundModel(
-            width = frame.width,
-            height = frame.height,
-            launchZone = requireNotNull(calibrationZone),
-            bounds = bounds,
-            meanY = meanY,
-            meanU = meanU,
-            meanV = meanV,
-            sigmaY = sigmaY,
-            medianSigmaY = zoneSigmas.median(),
-        )
+    private fun resetTrackingState() {
+        accumulators.clear()
+        lockedKey = null
+        lockedCandidate = null
+        missedLockFrames = 0
     }
 
-    private fun buildForegroundMask(frame: YuvFrame, background: ZoneBackgroundModel): ForegroundMask {
-        val raw = BooleanArray(frame.width * frame.height)
-        var rawCount = 0
-        for (row in background.bounds.top..background.bounds.bottom) {
-            for (column in background.bounds.left..background.bounds.right) {
-                val index = row * frame.width + column
-                val dY = frame.y[index].unsigned().toDouble() - background.meanY[index]
-                val threshold = max(config.minYDelta, config.significanceMultiplier * background.sigmaY[index])
-                if (dY >= threshold) {
-                    raw[index] = true
-                    rawCount += 1
-                }
-            }
-        }
-
-        val despeckled = BooleanArray(raw.size)
-        var despeckledCount = 0
-        for (row in background.bounds.top..background.bounds.bottom) {
-            for (column in background.bounds.left..background.bounds.right) {
-                val index = row * frame.width + column
-                if (!raw[index]) continue
-                val neighbours =
-                    included(raw, frame.width, frame.height, column - 1, row) +
-                        included(raw, frame.width, frame.height, column + 1, row) +
-                        included(raw, frame.width, frame.height, column, row - 1) +
-                        included(raw, frame.width, frame.height, column, row + 1)
-                if (neighbours >= 2) {
-                    despeckled[index] = true
-                    despeckledCount += 1
-                }
-            }
-        }
-
-        return ForegroundMask(mask = despeckled, count = despeckledCount.coerceAtLeast(if (rawCount == frame.width * frame.height) rawCount else 0))
-    }
-
-    private fun findComponents(
-        frame: YuvFrame,
-        background: ZoneBackgroundModel,
-        mask: BooleanArray,
-    ): List<Component> {
-        val visited = BooleanArray(mask.size)
-        val components = mutableListOf<Component>()
-        for (row in background.bounds.top..background.bounds.bottom) {
-            for (column in background.bounds.left..background.bounds.right) {
-                val index = row * frame.width + column
-                if (mask[index] && !visited[index]) {
-                    components += floodFill(frame, background.bounds, mask, visited, index)
-                }
-            }
-        }
-        return components
-    }
-
-    private fun floodFill(
+    private fun proposeCandidates(
         frame: YuvFrame,
         bounds: PixelBounds,
-        mask: BooleanArray,
-        visited: BooleanArray,
-        startIndex: Int,
-    ): Component {
-        val queue = ArrayDeque<Int>()
-        val pixelIndices = mutableListOf<Int>()
-        queue.add(startIndex)
-        visited[startIndex] = true
-        var minX = Int.MAX_VALUE
-        var maxX = Int.MIN_VALUE
-        var minY = Int.MAX_VALUE
-        var maxY = Int.MIN_VALUE
-
-        while (queue.isNotEmpty()) {
-            val index = queue.removeFirst()
-            val x = index % frame.width
-            val y = index / frame.width
-            pixelIndices += index
-            minX = min(minX, x)
-            maxX = max(maxX, x)
-            minY = min(minY, y)
-            maxY = max(maxY, y)
-            enqueueIfIncluded(index - 1, x > bounds.left, mask, visited, queue)
-            enqueueIfIncluded(index + 1, x < bounds.right, mask, visited, queue)
-            enqueueIfIncluded(index - frame.width, y > bounds.top, mask, visited, queue)
-            enqueueIfIncluded(index + frame.width, y < bounds.bottom, mask, visited, queue)
-        }
-
-        return Component(pixelIndices, minX, maxX, minY, maxY)
-    }
-
-    private fun enqueueIfIncluded(
-        index: Int,
-        inBounds: Boolean,
-        mask: BooleanArray,
-        visited: BooleanArray,
-        queue: ArrayDeque<Int>,
-    ) {
-        if (!inBounds || !mask[index] || visited[index]) return
-        visited[index] = true
-        queue.add(index)
-    }
-
-    private fun Component.toCandidate(
-        frame: YuvFrame,
-        background: ZoneBackgroundModel,
         mapper: FrameCoordinateMapper,
-    ): ZoneBallCandidateDebug {
-        var xSum = 0.0
-        var ySum = 0.0
-        var significanceSum = 0.0
-        var dUSum = 0.0
-        var dVSum = 0.0
-        for (index in pixelIndices) {
-            val x = index % frame.width
-            val y = index / frame.width
-            xSum += x
-            ySum += y
-            significanceSum += (frame.y[index].unsigned().toDouble() - background.meanY[index]) / background.sigmaY[index]
-            dUSum += frame.u[index].unsigned().toDouble() - background.meanU[index]
-            dVSum += frame.v[index].unsigned().toDouble() - background.meanV[index]
+        expectedRadius: Double,
+    ): List<Proposal> {
+        val radii = listOf(expectedRadius * 0.75, expectedRadius, expectedRadius * 1.4)
+            .map { it.roundToInt().coerceAtLeast(2) }
+            .distinct()
+        val proposals = mutableListOf<Proposal>()
+        for (radius in radii) {
+            for (row in bounds.top..bounds.bottom) {
+                for (column in bounds.left..bounds.right) {
+                    val proposal = scoreCandidate(frame, bounds, mapper, column, row, radius.toDouble())
+                    if (proposal != null) proposals += proposal
+                }
+            }
         }
-        val boxWidth = maxX - minX + 1
-        val boxHeight = maxY - minY + 1
-        val area = pixelIndices.size
-        val fillRatio = area.toDouble() / (boxWidth * boxHeight).toDouble()
-        val aspectRatio = min(boxWidth, boxHeight).toDouble() / max(boxWidth, boxHeight).toDouble()
-        val meanSignificance = significanceSum / area.toDouble()
-        val chromaShift = abs(dUSum / area.toDouble()) + abs(dVSum / area.toDouble())
-        val rankScore = meanSignificance * ((aspectRatio + fillRatio) / 2.0)
+        val selected = mutableListOf<Proposal>()
+        for (proposal in proposals.sortedByDescending { it.debug.rankScore }) {
+            val tooClose = selected.any { existing ->
+                hypot(existing.frameX - proposal.frameX, existing.frameY - proposal.frameY) <= max(existing.radiusPx, proposal.radiusPx)
+            }
+            if (!tooClose) selected += proposal
+            if (selected.size >= config.maxCandidatesPerFrame) break
+        }
+        return selected
+    }
+
+    private fun scoreCandidate(
+        frame: YuvFrame,
+        bounds: PixelBounds,
+        mapper: FrameCoordinateMapper,
+        centerX: Int,
+        centerY: Int,
+        radius: Double,
+    ): Proposal? {
+        val disc = sampleStats(frame, centerX, centerY, 0.0, radius)
+        val inner = sampleStats(frame, centerX, centerY, 0.0, radius * 0.60)
+        val annulus = sampleStats(frame, centerX, centerY, radius * 1.3, radius * 2.2)
+        if (disc.count == 0 || annulus.count == 0 || inner.count == 0) return null
+
+        val yDelta = disc.meanY - annulus.meanY
+        val contrast = abs(yDelta) / max(annulus.sigmaY, config.sigmaFloor)
+        if (contrast < config.minAnnulusContrast) return null
+
+        val uniformity = inner.sigmaY / max(annulus.sigmaY, config.sigmaFloor)
+        if (uniformity > config.maxInteriorUniformity) return null
+
+        val circularity = edgeCircularity(frame, bounds, centerX, centerY, radius, max(8.0, annulus.sigmaY * 1.5))
+        if (circularity < config.minEdgeCircularity) return null
+
+        val chromaShift = abs(disc.meanU - annulus.meanU) + abs(disc.meanV - annulus.meanV)
+        if (chromaShift > config.chromaShiftTolerance) return null
+
+        val score = contrast * circularity * (1.0 - uniformity.coerceIn(0.0, 0.95))
         val xDenominator = (frame.width - 1).coerceAtLeast(1).toDouble()
         val yDenominator = (frame.height - 1).coerceAtLeast(1).toDouble()
-        val viewCentroid = mapper.frameToView(
-            x = (xSum / area.toDouble()) / xDenominator,
-            y = (ySum / area.toDouble()) / yDenominator,
-        )
-
-        return ZoneBallCandidateDebug(
-            candidate = LumaMotionCandidate(
-                x = viewCentroid.x,
-                y = viewCentroid.y,
-                pixelCount = area,
-                confidence = (rankScore / 20.0).coerceIn(0.0, 1.0),
+        val viewCentroid = mapper.frameToView(centerX / xDenominator, centerY / yDenominator)
+        val area = (PI * radius * radius).roundToInt().coerceAtLeast(1)
+        return Proposal(
+            frameX = centerX.toDouble(),
+            frameY = centerY.toDouble(),
+            radiusPx = radius,
+            debug = ZoneBallCandidateDebug(
+                candidate = LumaMotionCandidate(
+                    x = viewCentroid.x,
+                    y = viewCentroid.y,
+                    pixelCount = area,
+                    confidence = (score / 12.0).coerceIn(0.0, 1.0),
+                ),
+                area = area,
+                fillRatio = circularity,
+                aspectRatio = 1.0,
+                meanSignificance = contrast,
+                chromaShift = chromaShift,
+                rankScore = score,
+                meanYDelta = yDelta,
+                radiusPx = radius,
+                annulusContrast = contrast,
+                interiorUniformity = uniformity,
+                edgeCircularity = circularity,
             ),
-            area = area,
-            fillRatio = fillRatio,
-            aspectRatio = aspectRatio,
-            meanSignificance = meanSignificance,
-            chromaShift = chromaShift,
-            rankScore = rankScore,
         )
+    }
+
+    private fun sampleStats(
+        frame: YuvFrame,
+        centerX: Int,
+        centerY: Int,
+        minRadius: Double,
+        maxRadius: Double,
+    ): SampleStats {
+        val minSquared = minRadius * minRadius
+        val maxSquared = maxRadius * maxRadius
+        val left = (centerX - maxRadius.roundToInt()).coerceAtLeast(0)
+        val right = (centerX + maxRadius.roundToInt()).coerceAtMost(frame.width - 1)
+        val top = (centerY - maxRadius.roundToInt()).coerceAtLeast(0)
+        val bottom = (centerY + maxRadius.roundToInt()).coerceAtMost(frame.height - 1)
+        var count = 0
+        var ySum = 0.0
+        var ySqSum = 0.0
+        var uSum = 0.0
+        var vSum = 0.0
+        for (row in top..bottom) {
+            for (column in left..right) {
+                val dx = column - centerX
+                val dy = row - centerY
+                val distanceSquared = (dx * dx + dy * dy).toDouble()
+                if (distanceSquared < minSquared || distanceSquared > maxSquared) continue
+                val index = row * frame.width + column
+                val y = frame.y[index].unsigned().toDouble()
+                count += 1
+                ySum += y
+                ySqSum += y * y
+                uSum += frame.u[index].unsigned().toDouble()
+                vSum += frame.v[index].unsigned().toDouble()
+            }
+        }
+        if (count == 0) return SampleStats()
+        val meanY = ySum / count.toDouble()
+        val variance = (ySqSum / count.toDouble() - meanY * meanY).coerceAtLeast(0.0)
+        return SampleStats(
+            count = count,
+            meanY = meanY,
+            sigmaY = sqrt(variance),
+            meanU = uSum / count.toDouble(),
+            meanV = vSum / count.toDouble(),
+        )
+    }
+
+    private fun edgeCircularity(
+        frame: YuvFrame,
+        bounds: PixelBounds,
+        centerX: Int,
+        centerY: Int,
+        radius: Double,
+        threshold: Double,
+    ): Double {
+        var supported = 0
+        var sampled = 0
+        repeat(32) { sample ->
+            val angle = sample * 2.0 * PI / 32.0
+            val innerX = (centerX + cos(angle) * radius * 0.75).roundToInt()
+            val innerY = (centerY + sin(angle) * radius * 0.75).roundToInt()
+            val outerX = (centerX + cos(angle) * radius * 1.30).roundToInt()
+            val outerY = (centerY + sin(angle) * radius * 1.30).roundToInt()
+            if (!bounds.contains(innerX, innerY) || !bounds.contains(outerX, outerY)) return@repeat
+            sampled += 1
+            val inner = frame.y[innerY * frame.width + innerX].unsigned()
+            val outer = frame.y[outerY * frame.width + outerX].unsigned()
+            if (abs(inner - outer) >= threshold) supported += 1
+        }
+        return if (sampled == 0) 0.0 else supported.toDouble() / sampled.toDouble()
+    }
+
+    private fun decayAccumulators() {
+        val iterator = accumulators.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            entry.value.score *= config.persistenceDecay
+            if (entry.value.score < 0.05) iterator.remove()
+        }
+    }
+
+    private fun updateLock(proposals: List<Proposal>, expectedRadius: Double, frame: YuvFrame): LumaMotionCandidate? {
+        val currentLock = lockedCandidate ?: return null
+        val maxDistance = max(0.025, expectedRadius * 2.0 / min(frame.width, frame.height).toDouble())
+        val near = proposals
+            .map { it.debug.candidate }
+            .filter { hypot(it.x - currentLock.x, it.y - currentLock.y) <= maxDistance }
+            .maxByOrNull { it.confidence }
+        if (near != null) {
+            lockedCandidate = near
+            missedLockFrames = 0
+            return near
+        }
+        missedLockFrames += 1
+        if (missedLockFrames >= config.maxMissedLockFrames) {
+            lockedKey = null
+            lockedCandidate = null
+        }
+        return null
+    }
+
+    private fun expectedRadius(bounds: PixelBounds): Double {
+        val zoneWidthPx = bounds.width.toDouble()
+        val expectedDiameter = zoneWidthPx * (config.ballDiameterMm / config.assumedZoneWidthMm)
+        return (expectedDiameter / 2.0).coerceIn(2.0, 40.0)
+    }
+
+    private fun Proposal.cellKey(expectedRadius: Double): CellKey {
+        val cellSize = max(1.0, expectedRadius / 2.0)
+        return CellKey((frameX / cellSize).roundToInt(), (frameY / cellSize).roundToInt())
     }
 
     private fun debug(
-        foregroundFraction: Double = 0.0,
-        backgroundStale: Boolean = false,
         candidates: List<ZoneBallCandidateDebug> = emptyList(),
-        rejectedBySize: Int = 0,
-        rejectedByShape: Int = 0,
-        rejectedBySignificance: Int = 0,
-        rejectedByChroma: Int = 0,
         margin: Double = 0.0,
-    ): ZoneBallDebug =
-        ZoneBallDebug(
-            calibrationState = calibrationState,
-            calibrationFramesCollected = calibrationFrameCount,
-            calibrationFramesRequired = config.calibrationFramesRequired,
-            medianSigmaY = model?.medianSigmaY ?: 0.0,
-            foregroundFraction = foregroundFraction,
-            backgroundStale = backgroundStale,
-            candidates = candidates,
-            rejectedBySize = rejectedBySize,
-            rejectedByShape = rejectedByShape,
-            rejectedBySignificance = rejectedBySignificance,
-            rejectedByChroma = rejectedByChroma,
-            margin = margin,
-        )
-
-    private fun ZoneBackgroundModel.matches(frame: YuvFrame, launchZone: LaunchZone): Boolean =
-        width == frame.width && height == frame.height && this.launchZone == launchZone
+        expectedRadiusPx: Double = 0.0,
+        leadingPersistence: Double = 0.0,
+    ): ZoneBallDebug = ZoneBallDebug(
+        calibrationState = calibrationState,
+        calibrationFramesCollected = warmupFrameCount,
+        calibrationFramesRequired = config.calibrationFramesRequired,
+        candidates = candidates,
+        margin = margin,
+        expectedRadiusPx = expectedRadiusPx,
+        lockThreshold = config.lockThreshold,
+        leadingPersistence = leadingPersistence,
+    )
 
     private fun LaunchZone.bounds(frame: YuvFrame): PixelBounds {
         val maxX = frame.width - 1
@@ -474,50 +449,34 @@ class ZoneBallDetector(
         return PixelBounds(left = leftPx, right = rightPx, top = topPx, bottom = bottomPx)
     }
 
-    private fun included(mask: BooleanArray, width: Int, height: Int, x: Int, y: Int): Int =
-        if (x in 0 until width && y in 0 until height && mask[y * width + x]) 1 else 0
-
     private fun Byte.unsigned(): Int = toInt() and 0xFF
 
-    private fun List<Double>.median(): Double {
-        if (isEmpty()) return 0.0
-        val sorted = sorted()
-        val middle = sorted.size / 2
-        return if (sorted.size % 2 == 0) {
-            (sorted[middle - 1] + sorted[middle]) / 2.0
-        } else {
-            sorted[middle]
-        }
-    }
-
     private data class PixelBounds(val left: Int, val right: Int, val top: Int, val bottom: Int) {
-        val area: Int = (right - left + 1) * (bottom - top + 1)
+        val width: Int = right - left + 1
+        fun contains(x: Int, y: Int): Boolean = x in left..right && y in top..bottom
     }
 
-    private data class ForegroundMask(val mask: BooleanArray, val count: Int)
-
-    private data class Component(
-        val pixelIndices: List<Int>,
-        val minX: Int,
-        val maxX: Int,
-        val minY: Int,
-        val maxY: Int,
+    private data class SampleStats(
+        val count: Int = 0,
+        val meanY: Double = 0.0,
+        val sigmaY: Double = 0.0,
+        val meanU: Double = 0.0,
+        val meanV: Double = 0.0,
     )
 
-    private data class ZoneBackgroundModel(
-        val width: Int,
-        val height: Int,
-        val launchZone: LaunchZone,
-        val bounds: PixelBounds,
-        val meanY: DoubleArray,
-        val meanU: DoubleArray,
-        val meanV: DoubleArray,
-        val sigmaY: DoubleArray,
-        val medianSigmaY: Double,
+    private data class Proposal(
+        val frameX: Double,
+        val frameY: Double,
+        val radiusPx: Double,
+        val debug: ZoneBallCandidateDebug,
     )
 
-    private companion object {
-        const val MIN_SIGMA_Y = 2.0
-        const val MAX_SIGMA_Y = 12.0
-    }
+    private data class CellKey(val x: Int, val y: Int)
+
+    private data class Accumulator(
+        val key: CellKey,
+        var score: Double = 0.0,
+        var candidate: LumaMotionCandidate? = null,
+        var debug: ZoneBallCandidateDebug? = null,
+    )
 }

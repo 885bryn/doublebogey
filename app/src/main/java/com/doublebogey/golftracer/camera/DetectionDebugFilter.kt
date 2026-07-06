@@ -11,12 +11,17 @@ object DetectionDebugFilter {
         }
 
         val state = trackerState ?: return emptyList()
-        val rankedCandidates = state.acquisitionDebug.candidates.map { candidate -> candidate.candidate }
-        val locked = state.lockedBall?.let(::listOf).orEmpty()
-        return (locked + rankedCandidates)
-            .filter { candidate -> launchZone.contains(candidate.x, candidate.y) }
-            .distinctBy { candidate -> candidate.x to candidate.y }
-            .take(3)
+        val locked = state.lockedBall
+        if (locked != null) {
+            return listOf(locked).filter { candidate -> launchZone.contains(candidate.x, candidate.y) }
+        }
+
+        return state.acquisitionDebug.candidates
+            .firstOrNull()
+            ?.candidate
+            ?.takeIf { candidate -> launchZone.contains(candidate.x, candidate.y) }
+            ?.let(::listOf)
+            .orEmpty()
     }
 
     fun visibleCandidates(

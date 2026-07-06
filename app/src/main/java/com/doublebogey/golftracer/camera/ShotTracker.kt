@@ -8,6 +8,7 @@ data class ShotTrackerConfig(
     val maxMatchDistance: Double = 0.12,
     val maxBridgeFrames: Int = 4,
     val minObservedPointsBeforeBridge: Int = 3,
+    val maxAccelerationPerSecondSquared: Double = 250.0,
 ) {
     init {
         require(minStartSpeedPerSecond > 0.0) { "minStartSpeedPerSecond must be greater than 0" }
@@ -15,6 +16,7 @@ data class ShotTrackerConfig(
         require(maxMatchDistance > 0.0) { "maxMatchDistance must be greater than 0" }
         require(maxBridgeFrames >= 0) { "maxBridgeFrames must not be negative" }
         require(minObservedPointsBeforeBridge >= 2) { "minObservedPointsBeforeBridge must be at least 2" }
+        require(maxAccelerationPerSecondSquared > 0.0) { "maxAccelerationPerSecondSquared must be greater than 0" }
     }
 }
 
@@ -89,7 +91,9 @@ class ShotTracker(
 
     private fun updateTracking(result: LumaMotionResult): ShotTrackerState {
         val predicted = predictNext(result.timestampNs)
-        val plausibleCandidates = result.candidates.filter { candidate -> continuesObservedTrajectory(candidate) }
+        val plausibleCandidates = result.candidates.filter { candidate ->
+            continuesObservedTrajectory(candidate) && accelerationIsPlausible(candidate, result.timestampNs)
+        }
         val match = predicted?.let { prediction ->
             plausibleCandidates
                 .map { candidate -> candidate to distance(candidate.x, candidate.y, prediction.x, prediction.y) }
@@ -168,6 +172,33 @@ class ShotTracker(
         return velocityX * candidateStepX + velocityY * candidateStepY > 0.0
     }
 
+    private fun accelerationIsPlausible(candidate: LumaMotionCandidate, timestampNs: Long): Boolean {
+        val observed = trackPoints.filterNot { point -> point.predicted }
+        if (observed.size < 2) {
+            return true
+        }
+
+        val previous = observed[observed.lastIndex - 1]
+        val current = observed.last()
+        val previousDeltaSeconds = (current.timestampNs - previous.timestampNs) / 1_000_000_000.0
+        val candidateDeltaSeconds = (timestampNs - current.timestampNs) / 1_000_000_000.0
+        if (previousDeltaSeconds < MIN_ACCELERATION_DELTA_SECONDS || candidateDeltaSeconds < MIN_ACCELERATION_DELTA_SECONDS) {
+            return true
+        }
+
+        val previousVx = (current.x - previous.x) / previousDeltaSeconds
+        val previousVy = (current.y - previous.y) / previousDeltaSeconds
+        val candidateVx = (candidate.x - current.x) / candidateDeltaSeconds
+        val candidateVy = (candidate.y - current.y) / candidateDeltaSeconds
+        val acceleration = distance(
+            previousVx,
+            previousVy,
+            candidateVx,
+            candidateVy,
+        ) / candidateDeltaSeconds
+        return acceleration <= config.maxAccelerationPerSecondSquared
+    }
+
     private fun predictNext(timestampNs: Long): ShotTrackPoint? {
         val observed = trackPoints.filterNot { point -> point.predicted }
         if (observed.size < 2) {
@@ -215,6 +246,10 @@ class ShotTracker(
 
     private fun distance(ax: Double, ay: Double, bx: Double, by: Double): Double =
         hypot(ax - bx, ay - by)
+
+    private companion object {
+        const val MIN_ACCELERATION_DELTA_SECONDS = 0.001
+    }
 
     private data class TimedCandidate(
         val timestampNs: Long,

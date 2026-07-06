@@ -18,6 +18,7 @@ import android.os.Looper
 import android.util.Range
 import android.view.Surface
 import android.view.TextureView
+import java.io.File
 import java.util.Locale
 
 class CameraCaptureController(
@@ -36,6 +37,7 @@ class CameraCaptureController(
     private val fpsCounter = FpsCounter()
     private val detector = LumaMotionDetector()
     private val tracker = AutoShotTracker()
+    private val cropLogger = ZoneCropLogger(File(context.filesDir, "debug-crops"))
     private val cameraCallbackHandler = Handler(Looper.getMainLooper())
 
     private var backgroundThread: HandlerThread? = null
@@ -51,6 +53,7 @@ class CameraCaptureController(
     private var lastFps = 0.0
     private var lastStatusTimestampNs = 0L
     private var lastDetectionOverlayTimestampNs = 0L
+    private var lastCropLogTimestampNs = 0L
 
     @Volatile
     private var coordinateMapper = FrameCoordinateMapper.Identity
@@ -401,12 +404,26 @@ class CameraCaptureController(
                             yPlane != null && uPlane != null && vPlane != null &&
                             yBuffer != null && uBuffer != null && vBuffer != null
                         ) {
-                            val yuvFrame = YuvFrameExtractor.extract(
+                            val mapper = coordinateMapper
+                            val lumaFrame = YuvFrameExtractor.extractLuma(
+                                yBuffer = yBuffer,
+                                width = image.width,
+                                height = image.height,
+                                yRowStride = yPlane.rowStride,
+                                yPixelStride = yPlane.pixelStride,
+                            )
+                            val motionResult = detector.analyzeFrame(lumaFrame, image.timestamp, mapper)
+                            val crop = mapper.viewZoneToFrameZone(launchZone).cropBounds(image.width, image.height)
+                            val zoneFrame = YuvFrameExtractor.extractCrop(
                                 yBuffer = yBuffer,
                                 uBuffer = uBuffer,
                                 vBuffer = vBuffer,
-                                width = image.width,
-                                height = image.height,
+                                sourceWidth = image.width,
+                                sourceHeight = image.height,
+                                cropLeft = crop.left,
+                                cropTop = crop.top,
+                                cropWidth = crop.width,
+                                cropHeight = crop.height,
                                 yRowStride = yPlane.rowStride,
                                 yPixelStride = yPlane.pixelStride,
                                 uRowStride = uPlane.rowStride,
@@ -414,9 +431,25 @@ class CameraCaptureController(
                                 vRowStride = vPlane.rowStride,
                                 vPixelStride = vPlane.pixelStride,
                             )
-                            val mapper = coordinateMapper
-                            val motionResult = detector.analyzeFrame(yuvFrame.toLumaFrame(), image.timestamp, mapper)
-                            autoTrackingState = tracker.update(yuvFrame, motionResult, launchZone, mapper)
+                            autoTrackingState = tracker.updateFromLaunchZoneCrop(
+                                zoneFrame = zoneFrame,
+                                result = motionResult,
+                                launchZone = launchZone,
+                                mapper = mapper,
+                                cropLeftPx = crop.left,
+                                cropTopPx = crop.top,
+                                sourceWidth = image.width,
+                                sourceHeight = image.height,
+                            )
+                            maybeLogZoneCrop(
+                                timestampNs = image.timestamp,
+                                zoneFrame = zoneFrame,
+                                state = autoTrackingState,
+                                mapper = mapper,
+                                crop = crop,
+                                sourceWidth = image.width,
+                                sourceHeight = image.height,
+                            )
                             motionResult
                         } else {
                             null
@@ -636,6 +669,7 @@ class CameraCaptureController(
         lastFps = 0.0
         lastStatusTimestampNs = 0L
         lastDetectionOverlayTimestampNs = 0L
+        lastCropLogTimestampNs = 0L
         fpsCounter.reset()
         detector.reset()
         tracker.reset()
@@ -659,6 +693,95 @@ class CameraCaptureController(
 
     private fun Exception.statusDetail(): String = message ?: javaClass.simpleName
 
+    private fun maybeLogZoneCrop(
+        timestampNs: Long,
+        zoneFrame: YuvFrame,
+        state: AutoShotTrackerState?,
+        mapper: FrameCoordinateMapper,
+        crop: PixelCrop,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ) {
+        if (state == null) return
+        if (lastCropLogTimestampNs != 0L && timestampNs - lastCropLogTimestampNs < CROP_LOG_INTERVAL_NS) return
+
+        val locked = state.lockedBall
+        val sample = when {
+            locked != null -> CropLogRequest(
+                center = locked.toCropPoint(mapper, crop, sourceWidth, sourceHeight),
+                kind = ZoneCropSampleKind.LockedBall,
+                score = locked.confidence,
+            )
+            state.acquisitionDebug.best != null -> {
+                val best = state.acquisitionDebug.best
+                CropLogRequest(
+                    center = best?.candidate?.toCropPoint(mapper, crop, sourceWidth, sourceHeight),
+                    kind = ZoneCropSampleKind.Candidate,
+                    score = best?.rankScore,
+                )
+            }
+            else -> CropLogRequest(
+                center = 0.5 to 0.5,
+                kind = ZoneCropSampleKind.RandomNegative,
+                score = null,
+            )
+        }
+        val center = sample.center ?: return
+        runCatching {
+            cropLogger.logSample(
+                frame = zoneFrame,
+                centerX = center.first,
+                centerY = center.second,
+                kind = sample.kind,
+                timestampNs = timestampNs,
+                score = sample.score,
+            )
+            lastCropLogTimestampNs = timestampNs
+        }
+    }
+
+    private fun LumaMotionCandidate.toCropPoint(
+        mapper: FrameCoordinateMapper,
+        crop: PixelCrop,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ): Pair<Double, Double>? {
+        val framePoint = mapper.viewToFrame(x, y)
+        val sourceX = framePoint.x * (sourceWidth - 1).coerceAtLeast(1)
+        val sourceY = framePoint.y * (sourceHeight - 1).coerceAtLeast(1)
+        val cropX = (sourceX - crop.left) / (crop.width - 1).coerceAtLeast(1).toDouble()
+        val cropY = (sourceY - crop.top) / (crop.height - 1).coerceAtLeast(1).toDouble()
+        if (cropX !in 0.0..1.0 || cropY !in 0.0..1.0) return null
+        return cropX to cropY
+    }
+
+    private data class CropLogRequest(
+        val center: Pair<Double, Double>?,
+        val kind: ZoneCropSampleKind,
+        val score: Double?,
+    )
+    private fun LaunchZone.cropBounds(frameWidth: Int, frameHeight: Int): PixelCrop {
+        val maxX = frameWidth - 1
+        val maxY = frameHeight - 1
+        val leftPx = (left * maxX).toInt().coerceIn(0, maxX)
+        val rightPx = ((left + width) * maxX).toInt().coerceIn(leftPx, maxX)
+        val topPx = (top * maxY).toInt().coerceIn(0, maxY)
+        val bottomPx = ((top + height) * maxY).toInt().coerceIn(topPx, maxY)
+        return PixelCrop(
+            left = leftPx,
+            top = topPx,
+            width = rightPx - leftPx + 1,
+            height = bottomPx - topPx + 1,
+        )
+    }
+
+    private data class PixelCrop(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int,
+    )
+
     private data class CameraConfig(
         val cameraId: String,
         val rankedModes: List<CaptureMode>,
@@ -669,6 +792,7 @@ class CameraCaptureController(
         const val MAX_IMAGES = 3
         const val STATUS_INTERVAL_NS = 1_000_000_000L
         const val DETECTION_OVERLAY_INTERVAL_NS = 33_333_333L
+        const val CROP_LOG_INTERVAL_NS = 1_000_000_000L
     }
 }
 

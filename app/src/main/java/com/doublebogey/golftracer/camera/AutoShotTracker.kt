@@ -109,6 +109,98 @@ class AutoShotTracker(
         return currentState()
     }
 
+    fun updateFromLaunchZoneCrop(
+        zoneFrame: YuvFrame,
+        result: LumaMotionResult,
+        launchZone: LaunchZone,
+        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
+        cropLeftPx: Int,
+        cropTopPx: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ): AutoShotTrackerState {
+        require(cropLeftPx >= 0) { "cropLeftPx must not be negative" }
+        require(cropTopPx >= 0) { "cropTopPx must not be negative" }
+        require(sourceWidth > 0) { "sourceWidth must be greater than 0" }
+        require(sourceHeight > 0) { "sourceHeight must be greater than 0" }
+        require(cropLeftPx + zoneFrame.width <= sourceWidth) { "zoneFrame must fit sourceWidth" }
+        require(cropTopPx + zoneFrame.height <= sourceHeight) { "zoneFrame must fit sourceHeight" }
+
+        val detectorZone = LaunchZone(left = 0.0, top = 0.0, width = 1.0, height = 1.0)
+        val mapCandidate: (LumaMotionCandidate) -> LumaMotionCandidate = { candidate ->
+            val cropXDenominator = (zoneFrame.width - 1).coerceAtLeast(1).toDouble()
+            val cropYDenominator = (zoneFrame.height - 1).coerceAtLeast(1).toDouble()
+            val sourceXDenominator = (sourceWidth - 1).coerceAtLeast(1).toDouble()
+            val sourceYDenominator = (sourceHeight - 1).coerceAtLeast(1).toDouble()
+            val frameX = (cropLeftPx + candidate.x * cropXDenominator) / sourceXDenominator
+            val frameY = (cropTopPx + candidate.y * cropYDenominator) / sourceYDenominator
+            val viewPoint = mapper.frameToView(frameX, frameY)
+            candidate.copy(x = viewPoint.x, y = viewPoint.y)
+        }
+
+        if (activeLaunchZone != launchZone) {
+            beginCalibration(launchZone, preserveDebug = false, detectorZone = detectorZone)
+        }
+
+        if (status == AutoShotTrackerStatus.Reviewing) {
+            if (result.timestampNs - reviewStartedNs >= config.reviewHoldNs) {
+                delegate.reset()
+                frozenTrackingState = null
+                clearLock()
+                status = AutoShotTrackerStatus.Searching
+            } else {
+                return currentState()
+            }
+        }
+
+        if (status == AutoShotTrackerStatus.Calibrating) {
+            val motion = motionMeter.measure(zoneFrame, detectorZone, FrameCoordinateMapper.Identity)
+            if (!motion.quiet) {
+                beginCalibration(launchZone, preserveDebug = false, detectorZone = detectorZone)
+                return currentState()
+            }
+
+            val detection = detector.collectCalibrationFrame(zoneFrame, detectorZone, FrameCoordinateMapper.Identity)
+                .mapCandidates(mapCandidate)
+            lastAcquisitionDebug = detection.debug
+            if (detector.calibrationState == ZoneBallCalibrationState.Calibrated) {
+                status = AutoShotTrackerStatus.Searching
+            }
+            return currentState()
+        }
+
+        if (status == AutoShotTrackerStatus.Tracking) {
+            val trackingState = delegate.update(result, launchZone)
+            if (trackingState.status == ShotTrackerStatus.Finalized) {
+                frozenTrackingState = trackingState
+                reviewStartedNs = result.timestampNs
+                status = AutoShotTrackerStatus.Reviewing
+            }
+            return currentState()
+        }
+
+        val stillDetection = detector.analyzeFrame(zoneFrame, detectorZone, FrameCoordinateMapper.Identity)
+            .mapCandidates(mapCandidate)
+        lastAcquisitionDebug = stillDetection.debug
+        if (stillDetection.debug.backgroundStale) {
+            beginCalibration(launchZone, preserveDebug = true, detectorZone = detectorZone)
+            return currentState()
+        }
+
+        when (status) {
+            AutoShotTrackerStatus.Searching -> updateBallLock(stillDetection.acceptedCandidate, launchZone, result.timestampNs)
+            AutoShotTrackerStatus.BallLocked -> {
+                maintainLock(stillDetection.acceptedCandidate)
+                if (status == AutoShotTrackerStatus.BallLocked) {
+                    maybeStartTracking(result, stillDetection.acceptedCandidate, launchZone)
+                }
+            }
+            else -> Unit
+        }
+
+        return currentState()
+    }
+
     fun update(result: LumaMotionResult, launchZone: LaunchZone): AutoShotTrackerState {
         if (status == AutoShotTrackerStatus.Calibrating) status = AutoShotTrackerStatus.Searching
         if (status == AutoShotTrackerStatus.Reviewing) return currentState()
@@ -167,9 +259,13 @@ class AutoShotTracker(
         return currentState()
     }
 
-    private fun beginCalibration(launchZone: LaunchZone, preserveDebug: Boolean) {
+    private fun beginCalibration(
+        launchZone: LaunchZone,
+        preserveDebug: Boolean,
+        detectorZone: LaunchZone = launchZone,
+    ) {
         delegate.reset()
-        detector.startCalibration(launchZone)
+        detector.startCalibration(detectorZone)
         motionMeter.reset()
         activeLaunchZone = launchZone
         clearLock()
@@ -273,6 +369,17 @@ class AutoShotTracker(
         stableFrameCount = 0
         lostFrameCount = 0
     }
+
+    private fun ZoneBallDetection.mapCandidates(
+        transform: (LumaMotionCandidate) -> LumaMotionCandidate,
+    ): ZoneBallDetection = copy(
+        acceptedCandidate = acceptedCandidate?.let(transform),
+        debug = debug.copy(
+            candidates = debug.candidates.map { candidateDebug ->
+                candidateDebug.copy(candidate = transform(candidateDebug.candidate))
+            },
+        ),
+    )
 
     private fun currentState(): AutoShotTrackerState =
         AutoShotTrackerState(

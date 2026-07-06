@@ -6,7 +6,7 @@
 
 ## OBJECTIVE
 
-Build a single Android app, installed as one APK on two phones, that traces a golf ball's flight. One phone (CAMERA role) is tripod-mounted, captures a white ball off the tee, detects its path frame-by-frame, fits a smooth trajectory, and sends it to the other phone (DISPLAY role) over the local network. The display phone renders a glowing arc over the captured scene and keeps it on screen until the next shot. No cloud, no external services, no paid hardware.
+Build a single Android app, installed as one APK on two phones, that traces a golf ball's flight. One phone (CAMERA role) is tripod-mounted, acquires the placed ball in the launch zone, detects impact/launch, tracks the ball through flight, fits a smooth trajectory, and sends it to the other phone (DISPLAY role) over the local network. The display phone renders a glowing arc over the captured scene and keeps it on screen until the next shot. No cloud, no external services, no paid hardware.
 
 ---
 
@@ -18,7 +18,7 @@ Build a single Android app, installed as one APK on two phones, that traces a go
 - **Distribution:** sideload to the developer's own devices, manual updates. No Play Store. No store-review constraints on permissions.
 - **Latency budget:** a few seconds from impact to arc-on-screen is acceptable. Real-time-while-airborne is NOT required (the user watches the real ball flight live; the on-screen arc is a review artifact). This permits a **capture-then-process** model — exploit it.
 - **Persistence:** arc stays on screen until the next shot replaces it. MVP shows the single most-recent shot only.
-- **Ball:** white balls only for the MVP. Colored-ball support is explicitly deferred.
+- **Ball:** white balls are the MVP target, but detection must not assume the ball is brighter than the surface. The acquisition path should tolerate balls that appear brighter or darker than the immediate background; colored-ball product support remains deferred.
 - **History:** reviewing earlier shots is a planned post-MVP feature. The shot data model must accommodate it now (see Data Model) but the MVP must not build the history UI.
 
 ---
@@ -29,8 +29,8 @@ Build a single Android app, installed as one APK on two phones, that traces a go
 - NEVER hardcode an IP address or assume which phone is the server. Use service discovery so DISPLAY finds CAMERA automatically (see Networking).
 - NEVER hardcode the capture frame rate. Enumerate the device's supported high-speed ranges at runtime and pick the best available with a documented fallback ladder.
 - NEVER add a cloud call, analytics SDK, or external network host. All traffic stays on the local subnet.
-- Do all heavy detection work on the camera's luminance (Y) plane, not full RGB. A white ball is a high-luma object — this is faster and is the floor-device's lifeline.
-- STOP and ask the developer before: changing the Shot JSON schema, adding a heavy native dependency (e.g. OpenCV), or touching anything outside the project directory.
+- Do all heavy vision work on the camera's luminance (Y) plane first, not full RGB. Acquisition must use local, relative, sign-invariant cues rather than absolute brightness or a calibrated background. RGB/chroma may be used only as a weak veto or for debug/data logging.
+- STOP and ask the developer before: changing the Shot JSON schema, adding a heavy native dependency (e.g. OpenCV), adding a learned model/runtime dependency, or touching anything outside the project directory.
 - After each milestone, output: `✅ [milestone] — what was built — how it was verified on a physical device`. Do not advance past a milestone whose acceptance test failed.
 
 ---
@@ -60,10 +60,12 @@ Build a single Android app, installed as one APK on two phones, that traces a go
 - **Reconnect:** DISPLAY auto-reconnects if the socket drops; CAMERA keeps advertising while running. Show a clear connection-state indicator on both screens.
 
 ### CAMERA pipeline (capture-then-process)
-1. **Capture** at the best supported high frame rate (see Detection). Feed frames as `YUV_420_888` via `ImageReader`; process the **Y plane only**.
-2. **Live lightweight detection** runs per frame and appends `(tMs, x, y, confidence)` to an in-memory point list. Do NOT buffer raw frames (memory blowout at 240fps) — buffer points plus ONE clean background keyframe.
-3. **Trigger / finalize** logic (launch-zone gating) decides when a shot starts and ends.
-4. On finalize: outlier-reject → smooth → fit curve → grab background JPEG → assemble Shot JSON → push over WebSocket.
+1. **Capture** at the best supported high frame rate (see Detection). Feed frames as YUV_420_888 via ImageReader; process the **Y plane only** for the core detector.
+2. **Still-ball acquisition** runs inside the launch-zone crop using local appearance cues: expected ball scale from zone geometry, sign-invariant local contrast, interior uniformity, circular edge support, weak chroma veto, and temporal persistence. No calibrated background model is used.
+3. **Launch trigger** is vision-only for current M3 range testing: the locked ball must disappear and a motion streak must leave the launch area. Audio impact detection is deferred because adjacent hitters at public ranges make mic transients ambiguous.
+4. **Flight tracking** uses predicted-crop motion detection, a single Kalman-style hypothesis, and ballistic gating. Do NOT run a full-frame ball search after launch.
+5. **Debug/data logging** records crop samples for locked balls, rejected candidates, and random negatives so field sessions produce training/debug data.
+6. On finalize: outlier-reject -> smooth -> fit curve -> grab background JPEG -> assemble Shot JSON -> push over WebSocket.
 
 ### DISPLAY pipeline
 1. Receive Shot JSON.
@@ -81,38 +83,59 @@ Build a single Android app, installed as one APK on two phones, that traces a go
 - **Language:** Kotlin. Both targets are Android — pay no cross-platform tax.
 - **Build:** single Gradle module, one APK. `minSdk 30` is safe (both devices on latest Android).
 - **Camera:** Camera2 `CameraConstrainedHighSpeedCaptureSession` for high-speed capture, enumerated via `CameraCharacteristics` → `getHighSpeedVideoFpsRanges()`. Fall back to CameraX standard capture at max supported FPS if a device exposes no constrained high-speed range.
-- **Vision:** custom Kotlin operating on the Y plane (frame differencing + luma threshold + connected-component centroid). No OpenCV for the MVP — fewer fragile native deps means fewer agentic build-failure cycles. OpenCV is a documented fallback ONLY if the custom detector underperforms, and only after asking.
+- **Vision:** custom Kotlin operating on the Y plane. Still-ball acquisition uses local, sign-invariant appearance scoring plus persistence; flight tracking uses predicted-crop frame differencing, single-hypothesis tracking, and ballistic gates. No OpenCV for the MVP — fewer fragile native deps means fewer agentic build-failure cycles. OpenCV or learned inference runtimes are documented fallbacks/additions ONLY after asking.
 - **Networking:** `NsdManager` (discovery) + Ktor embedded WebSocket server / OkHttp WebSocket client.
 - **Rendering:** Android `Canvas` + `Paint` with `BlurMaskFilter` for the glow (or `RenderEffect` blur on API 31+, which both devices have).
-- **Permissions:** `CAMERA`, `NEARBY_WIFI_DEVICES` (API 33+), `INTERNET`, `ACCESS_NETWORK_STATE`. No storage permission needed for MVP.
+- **Permissions:** CAMERA, NEARBY_WIFI_DEVICES (API 33+), INTERNET, ACCESS_NETWORK_STATE. RECORD_AUDIO is deferred with the audio trigger. No storage permission needed for MVP; debug crop logs stay in app-private storage and can be exported explicitly.
 
 ---
 
 ## DETECTION DESIGN (the crux)
 
-White ball against an uncontrolled outdoor background. The hard window is the first fraction of a second after impact — ball low, fast, against ground clutter — because it sets launch angle.
+The original high-luma/frame-difference detector was not enough for real range conditions. M3 now separates three problems that need different evidence: still-ball acquisition, launch triggering, and flight tracking.
 
-**Frame rate:** enumerate and pick best, fallback ladder **240 → 120 → 60 → 30 fps**. Log the chosen rate. Higher is better; at 240fps a driver shot still yields tens of in-frame samples.
+**Frame rate:** enumerate and pick best, fallback ladder **240 → 120 → 60 → 30 fps**. Log the chosen rate. Higher is better, but the detection model must not depend on a hardcoded FPS.
 
-**Per-frame detector (Y plane):**
-1. Frame-difference current vs previous Y plane (absolute difference) → isolates motion.
-2. Threshold on high luma AND high motion → white ball is bright and fast; this rejects most static bright objects.
-3. Connected components → candidate blobs. Filter by size (small, roughly ball-sized given expected distance) and reject blobs that are large/diffuse (clouds, glare patches).
-4. Take the blob centroid as the candidate `(x, y)`.
+### Still-ball acquisition
 
-**Launch-zone gating (also the primary false-positive defense):**
-- Define a draggable **launch zone** rectangle the user positions over the tee region (default: bottom-center). Persist it.
-- A shot STARTS when a qualifying bright/fast blob exits the launch zone above a speed threshold heading outward/upward.
-- This rejects birds (slow/erratic, wrong origin), carts (slow, wrong origin), other golfers' balls (don't originate in YOUR launch zone), and waving flags (no net displacement).
+Acquire the placed ball before launch from the launch-zone Y-plane crop. This is an appearance problem, not a motion problem.
 
-**Tracking + occlusion bridging:**
-- Maintain a motion model: last position + velocity. Each frame, match the blob nearest the predicted next position.
-- If no blob matches (ball behind tree / club on follow-through / pole), **predict-forward** for up to K frames (~150 ms). Reacquire within K → bridge the gap and flag `occlusionBridged`. Gap exceeds K → finalize the shot and flag `lowConfidence`.
-- This both tolerates occlusion and rejects spurious blobs far from prediction.
+- Derive expected ball radius from launch-zone geometry: ball diameter 42.7 mm over an assumed hitting-zone width, clamped to a useful pixel range.
+- Propose compact blobs using local, sign-invariant contrast. A ball may be brighter or darker than the surface, so never require positive luma delta and never compare against a calibrated background frame.
+- Score candidates with in-frame local measurements: disc-vs-annulus contrast, interior uniformity, circular edge support, and a weak chroma veto for strongly colored non-balls.
+- Use temporal persistence to lock. Per-frame evidence proposes; a decaying accumulator over zone positions decides. Ambiguous two-ball cases keep searching.
+- Maintain the lock by re-verifying near the locked point. If the ball is missing/far for the configured loss window, unlock and return to searching.
 
-**Finalize** when: blob leaves frame, or no qualifying blob for N frames, or max-duration timeout (e.g. 2.5 s).
+### Launch trigger
 
-> If auto-trigger proves flaky in the field, a **tap-to-arm** fallback (user taps, app records a fixed window, then processes) is acceptable. You have autonomy to choose; document the decision.
+For current M3 range testing, launch detection is vision-only. Public driving-range sessions have
+many adjacent hitters, so phone-mic impact events are expected to be ambiguous and likely to create
+confusing false proposals.
+
+- Require the locked ball to disappear from its spot.
+- Require a motion streak leaving the launch area.
+- Keep audio impact detection deferred until field evidence shows motion-only launch is insufficient
+  in conditions where mic events can be trusted.
+
+### Flight tracking
+
+After launch, this becomes a motion and physics problem. Do not reuse the still-ball acquisition pipeline.
+
+- Use three-frame differencing inside a predicted crop, not full-frame background subtraction.
+- Track one active hypothesis with state (x, y, vx, vy). Search near the prediction, associate the nearest consistent detection, and coast through short misses.
+- Apply ballistic/origin gates so candidates must plausibly leave the launch area and continue along the predicted path.
+- Finalize when the track leaves frame, misses for too long, or hits a max-duration timeout.
+
+### Debug and data collection
+
+M3 is still debug-first. The overlay must show acquisition/tracking state, and field sessions must produce useful evidence.
+
+- Acquisition status line includes expected radius, candidate count, best cue scores, persistence, and margin.
+- While locked, overlay only the locked ball point.
+- Log 48x48 crops of locked balls, top rejected candidates, and random zone negatives to app-private storage. Add an explicit export action for labeling/debugging.
+- A learned crop verifier is deferred until enough app-owned crops exist. Do not use Ultralytics YOLOv8, AGPL/GPL code, unknown third-party weights, or unlicensed model assets.
+
+> If vision-only auto-trigger remains flaky after M3 range testing, a tap-to-arm fixed-window fallback is acceptable. Document that decision after field testing.
 
 ---
 
@@ -178,8 +201,8 @@ One Shot object, normalized coords, JSON over the wire. MVP keeps only the lates
 **M2 — Capture + luma access.** Open the best supported high-speed session (enumerate; ladder 240→120→60→30), feed Y-plane frames to a processing callback, show a live preview with on-screen reported FPS and a draggable, persisted launch-zone box.
 - *Accept:* preview runs on both devices; chosen FPS logged; launch zone drags and persists.
 
-**M3 — Detection + tracking.** Frame-diff + luma/motion threshold + blob centroid; launch-zone gating + speed trigger; motion-model tracking with occlusion bridging; overlay detected points live on preview for debugging.
-- *Accept:* hitting a white ball produces a clean point track on preview; slow/background motion does not trigger a shot.
+**M3 — Surface-agnostic acquisition + launch + tracking.** Implement the debug-first detection stack in active sub-phases: (1) still-ball acquisition rewrite, (2) crop logging/debug dumps, and (3) predicted-crop flight tracking with single-hypothesis/ballistic gating. Audio impact trigger is deferred for public-range testing. Overlay acquisition and tracking state live on preview for debugging.
+- *Accept:* the app locks the real ball within a few seconds across bright/dark/shadowed/partially occluded launch conditions, does not false-lock over a full bucket, detects launch only when vision confirms ball disappearance plus launch motion, and produces a clean point track on preview while slow/background motion does not trigger a shot.
 
 **M4 — Fit + transmit.** On finalize: outlier-reject → smooth → build curve → capture background keyframe → emit Shot JSON over the socket.
 - *Accept:* DISPLAY receives one well-formed Shot object per shot with sane points.
@@ -187,10 +210,10 @@ One Shot object, normalized coords, JSON over the wire. MVP keeps only the lates
 **M5 — Render.** DISPLAY draws the glowing arc over the background keyframe, persists until next shot.
 - *Accept:* arc is smooth and glowing, replaces on next shot, end-to-end impact→arc within a few seconds.
 
-**M6 — Field hardening.** FPS-fallback robustness, glare/over-exposure guard, confidence display, socket reconnect.
+**M6 — Field hardening.** FPS-fallback robustness, glare/over-exposure guard, confidence display, socket reconnect, range-condition tuning, and optional learned crop verifier once enough app-owned crop data exists.
 - *Accept:* works at a real range across midday, golden hour, and overcast.
 
-**Deferred (do NOT build now; just leave the seams):** shot-history persistence + review UI, colored-ball detection mode, multi-shot overlay.
+**Deferred (do NOT build now; just leave the seams):** shot-history persistence + review UI, colored-ball product mode, multi-shot overlay, and any learned verifier until crop logs contain enough labeled positives/negatives.
 
 ---
 

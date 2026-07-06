@@ -69,6 +69,37 @@ class YuvFrameExtractorTest {
         assertContentEquals(frame.y, frame.toLumaFrame().luma)
     }
 
+
+    @Test
+    fun extractsOnlyLumaUsingRowAndPixelStrides() {
+        val ySource = bytes(
+            10, 99, 20, 98, 30, 97, 0,
+            40, 96, 50, 95, 60, 94, 0,
+            70, 93, 80, 92, 90, 91, 0,
+            100, 89, 110, 88, 120, 87, 0,
+        )
+
+        val frame = YuvFrameExtractor.extractLuma(
+            yBuffer = ByteBuffer.wrap(ySource),
+            width = 3,
+            height = 4,
+            yRowStride = 7,
+            yPixelStride = 2,
+        )
+
+        assertEquals(3, frame.width)
+        assertEquals(4, frame.height)
+        assertContentEquals(
+            bytes(
+                10, 20, 30,
+                40, 50, 60,
+                70, 80, 90,
+                100, 110, 120,
+            ),
+            frame.luma,
+        )
+    }
+
     private fun bytes(vararg values: Int): ByteArray =
         ByteArray(values.size) { index -> values[index].toByte() }
 }

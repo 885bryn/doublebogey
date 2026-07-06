@@ -1,6 +1,12 @@
 # Automatic Ball Acquisition Redesign
 
-Status: proposed. Supersedes the acquisition half of `2026-06-30-m3-detection-debug-first-design.md`.
+Status: superseded (detection method). The calibrated-background detection approach (§3) failed
+in the field (2026-07-05 range session: false lock on a 6 px speck while the real ball produced
+no candidate) and is replaced by
+`2026-07-05-surface-agnostic-acquisition-and-tracking.md`. The camera-control prerequisite
+(§3.1), coordinate-mapper rule (§1d), and `AutoShotTracker` lifecycle shape carry forward.
+
+Originally: proposed. Supersedes the acquisition half of `2026-06-30-m3-detection-debug-first-design.md`.
 The launch/track half of M3 (`ShotTracker`, `LumaMotionDetector`) is retained.
 
 ## 0. Calibrate against reference imagery before tuning constants

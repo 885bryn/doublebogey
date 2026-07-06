@@ -130,6 +130,29 @@ class ShotTrackerTest {
     }
 
     @Test
+    fun rejectsCandidateNearPredictionWhenAccelerationIsImplausible() {
+        val tracker = ShotTracker(
+            config = ShotTrackerConfig(
+                minStartSpeedPerSecond = 1.0,
+                maxMatchDistance = 0.12,
+                maxBridgeFrames = 2,
+                maxAccelerationPerSecondSquared = 5.0,
+            ),
+        )
+        val zone = LaunchZone(left = 0.40, top = 0.70, width = 0.20, height = 0.20)
+
+        tracker.update(resultAt(0L, candidate(x = 0.50, y = 0.78)), zone)
+        tracker.update(resultAt(100_000_000L, candidate(x = 0.50, y = 0.58)), zone)
+        tracker.update(resultAt(200_000_000L, candidate(x = 0.50, y = 0.38)), zone)
+        val state = tracker.update(resultAt(300_000_000L, candidate(x = 0.60, y = 0.18)), zone)
+
+        assertEquals(ShotTrackerStatus.Tracking, state.status)
+        assertTrue(state.points.last().predicted)
+        assertEquals(0.50, state.points.last().x, absoluteTolerance = 0.000000001)
+        assertEquals(0.18, state.points.last().y, absoluteTolerance = 0.000000001)
+    }
+
+    @Test
     fun bridgesShortOcclusionWithPredictedPointAndReacquires() {
         val tracker = ShotTracker(
             config = ShotTrackerConfig(

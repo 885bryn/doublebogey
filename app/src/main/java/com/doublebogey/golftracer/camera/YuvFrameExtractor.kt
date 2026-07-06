@@ -69,6 +69,32 @@ object YuvFrameExtractor {
         return YuvFrame(width = width, height = height, y = y, u = u, v = v)
     }
 
+    fun extractLuma(
+        yBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        yRowStride: Int,
+        yPixelStride: Int,
+    ): LumaFrame {
+        require(width > 0) { "width must be greater than 0" }
+        require(height > 0) { "height must be greater than 0" }
+        require(yRowStride > 0) { "yRowStride must be greater than 0" }
+        require(yPixelStride > 0) { "yPixelStride must be greater than 0" }
+
+        val yPlane = yBuffer.duplicate()
+        val luma = ByteArray(width * height)
+        var outputIndex = 0
+        for (row in 0 until height) {
+            val yRowStart = row * yRowStride
+            for (column in 0 until width) {
+                luma[outputIndex] = yPlane.get(yRowStart + column * yPixelStride)
+                outputIndex += 1
+            }
+        }
+
+        return LumaFrame(width = width, height = height, luma = luma)
+    }
+
     fun extractCrop(
         yBuffer: ByteBuffer,
         uBuffer: ByteBuffer,
