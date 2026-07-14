@@ -11,6 +11,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -24,10 +25,8 @@ import java.util.Locale
 class CameraCaptureController(
     private val context: Context,
     private val textureView: TextureView,
-    // Status is delivered on the calling callback thread. Task 6's caller will marshal to UI.
     private val onStatus: (String) -> Unit,
     private val launchZoneProvider: () -> LaunchZone = { LaunchZone.Default },
-    // Detection results are delivered on the camera callback thread. The caller marshals to UI.
     private val onDetectionResult: (LumaMotionResult) -> Unit = {},
     private val onTrackingState: (ShotTrackerState) -> Unit = {},
     private val onAutoTrackingState: (AutoShotTrackerState) -> Unit = {},
@@ -39,9 +38,18 @@ class CameraCaptureController(
     private val tracker = AutoShotTracker()
     private val cropLogger = ZoneCropLogger(File(context.filesDir, "debug-crops"))
     private val cameraCallbackHandler = Handler(Looper.getMainLooper())
+    private val resourceCoordinator = LifecycleResourceCoordinator()
+    private val callbackDispatcher = GenerationBoundDispatcher<FrameGeneration>(
+        isCurrent = ::isCurrent,
+        enqueue = cameraCallbackHandler::post,
+    )
+    private val analysisGate = CameraFrameAnalysisGate()
+    private val requestPolicy = CameraRequestPolicy.default()
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
+    private var analysisThread: HandlerThread? = null
+    private var analysisHandler: Handler? = null
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
@@ -89,18 +97,23 @@ class CameraCaptureController(
             return
         }
 
-        if (started) {
-            return
-        }
+        val callbackGeneration = resourceCoordinator.mutate {
+            if (started) {
+                null
+            } else {
+                started = true
+                generation += 1
+                generation
+            }
+        } ?: return
 
-        started = true
-        generation += 1
         resetFrameStats()
         startBackgroundThread()
+        startAnalysisThread()
 
         textureView.surfaceTextureListener = surfaceTextureListener
         if (textureView.isAvailable) {
-            openRearCameraIfReady(generation)
+            openRearCameraIfReady(callbackGeneration)
         } else {
             emitStatusFromCallingThread("Waiting for camera preview surface")
         }
@@ -113,21 +126,20 @@ class CameraCaptureController(
     }
 
     fun stop() {
-        generation += 1
-        started = false
-        openingCamera = false
         textureView.surfaceTextureListener = null
-
-        closeActiveCaptureResources(releasePreviewSurface = true)
-
-        cameraDevice?.close()
-        cameraDevice = null
-
-        selectedMode = null
-        remainingModes.clear()
-        resetFrameStats()
+        resourceCoordinator.mutate {
+            generation += 1
+            started = false
+            openingCamera = false
+            closeActiveCaptureResourcesLocked(releasePreviewSurface = true)
+            cameraDevice?.close()
+            cameraDevice = null
+            selectedMode = null
+            remainingModes.clear()
+        }
 
         stopBackgroundThread()
+        stopAnalysisThread()
     }
 
     private fun startBackgroundThread() {
@@ -156,8 +168,37 @@ class CameraCaptureController(
         }
     }
 
+    private fun startAnalysisThread() {
+        if (analysisThread != null) {
+            return
+        }
+
+        val thread = HandlerThread("CameraFrameAnalysis")
+        thread.start()
+        analysisThread = thread
+        analysisHandler = Handler(thread.looper)
+    }
+
+    private fun stopAnalysisThread() {
+        val thread = analysisThread
+        analysisThread = null
+        analysisHandler = null
+
+        thread?.quitSafely()
+        if (thread != null && Thread.currentThread() != thread) {
+            try {
+                thread.join()
+            } catch (exception: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
     private fun openRearCameraIfReady(callbackGeneration: Int) {
-        if (!isCurrent(callbackGeneration) || cameraDevice != null || openingCamera) {
+        val canOpen = resourceCoordinator.mutate {
+            isCurrent(callbackGeneration) && cameraDevice == null && !openingCamera
+        }
+        if (!canOpen) {
             return
         }
 
@@ -179,17 +220,28 @@ class CameraCaptureController(
             return
         }
 
-        previewTexture = texture
-        remainingModes = ArrayDeque(cameraConfig.rankedModes)
-        coordinateMapper = FrameCoordinateMapper.forRearCamera(
+        val mapper = FrameCoordinateMapper.forRearCamera(
             sensorOrientationDegrees = cameraConfig.sensorOrientationDegrees,
             displayRotationDegrees = currentDisplayRotationDegrees(),
         )
-        openingCamera = true
-        emitStatusFromCallingThread(
-            "Opening rear camera with ${cameraConfig.rankedModes.size} candidate modes rot=${coordinateMapper.rotationDegrees}",
+        val published = resourceCoordinator.publishIfCurrent(
+            isCurrent = {
+                isCurrent(callbackGeneration) && cameraDevice == null && !openingCamera
+            },
+            publish = {
+                previewTexture = texture
+                remainingModes = ArrayDeque(cameraConfig.rankedModes)
+                coordinateMapper = mapper
+                openingCamera = true
+            },
         )
+        if (!published) {
+            return
+        }
 
+        emitStatusFromCallingThread(
+            "Opening rear camera with ${cameraConfig.rankedModes.size} candidate modes rot=${mapper.rotationDegrees}",
+        )
         openCamera(cameraConfig.cameraId, callbackGeneration)
     }
 
@@ -295,13 +347,18 @@ class CameraCaptureController(
                 cameraId,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(camera: CameraDevice) {
-                        if (!isCurrent(callbackGeneration)) {
+                        val published = resourceCoordinator.publishIfCurrent(
+                            isCurrent = { isCurrent(callbackGeneration) },
+                            publish = {
+                                openingCamera = false
+                                cameraDevice = camera
+                            },
+                        )
+                        if (!published) {
                             camera.close()
                             return
                         }
 
-                        openingCamera = false
-                        cameraDevice = camera
                         tryNextMode(camera, callbackGeneration, null)
                     }
 
@@ -316,52 +373,82 @@ class CameraCaptureController(
                 cameraCallbackHandler,
             )
         } catch (exception: Exception) {
-            openingCamera = false
-            emitStatusFromCallingThread("Failed to open camera: ${exception.statusDetail()}")
-            closeCameraResourcesFromCallback(callbackGeneration, null)
+            val current = resourceCoordinator.mutate {
+                if (isCurrent(callbackGeneration)) {
+                    openingCamera = false
+                    true
+                } else {
+                    false
+                }
+            }
+            if (current) {
+                emitStatusFromCallingThread("Failed to open camera: ${exception.statusDetail()}")
+                closeCameraResourcesFromCallback(callbackGeneration, null)
+            }
         }
     }
 
     private fun tryNextMode(camera: CameraDevice, callbackGeneration: Int, previousFailure: String?) {
-        if (!isCurrent(callbackGeneration)) {
-            camera.close()
+        val setup = resourceCoordinator.mutate {
+            if (!isCurrent(callbackGeneration)) {
+                null
+            } else {
+                closeActiveCaptureResourcesLocked(releasePreviewSurface = false)
+                val mode = remainingModes.removeFirstOrNull()
+                val texture = previewTexture
+                if (mode == null || texture == null) {
+                    null
+                } else {
+                    readerGeneration += 1
+                    ModeSetup(mode, texture, readerGeneration, remainingModes.size)
+                }
+            }
+        }
+        if (setup == null) {
+            if (!isCurrent(callbackGeneration)) {
+                camera.close()
+            } else {
+                val failureDetail = previousFailure?.let { ": $it" }.orEmpty()
+                closeCameraResourcesFromCallback(
+                    callbackGeneration,
+                    "No viable rear camera capture mode remaining$failureDetail",
+                )
+            }
             return
         }
 
-        closeActiveCaptureResources(releasePreviewSurface = false)
-
-        if (remainingModes.isEmpty()) {
-            val failureDetail = previousFailure?.let { ": $it" }.orEmpty()
-            closeCameraResourcesFromCallback(callbackGeneration, "No viable rear camera capture mode remaining$failureDetail")
-            return
-        }
-
-        val mode = remainingModes.removeFirst()
-        val texture = previewTexture
-        if (texture == null) {
-            closeCameraResourcesFromCallback(callbackGeneration, "preview texture unavailable for ${mode.statusLabel()}")
-            return
-        }
-
-        texture.setDefaultBufferSize(mode.width, mode.height)
-        val newPreviewSurface = Surface(texture)
-        val callbackReaderGeneration = readerGeneration + 1
-        val newImageReader = createImageReader(mode, callbackGeneration, callbackReaderGeneration)
-
-        if (!isCurrent(callbackGeneration)) {
+        setup.texture.setDefaultBufferSize(setup.mode.width, setup.mode.height)
+        val newPreviewSurface = Surface(setup.texture)
+        val newImageReader = createImageReader(setup.mode, callbackGeneration, setup.readerGeneration)
+        val frameGeneration = FrameGeneration(callbackGeneration, setup.readerGeneration)
+        val published = resourceCoordinator.publishIfCurrent(
+            isCurrent = { isCurrent(frameGeneration) },
+            publish = {
+                selectedMode = setup.mode
+                previewSurface = newPreviewSurface
+                imageReader = newImageReader
+            },
+        )
+        if (!published) {
             newImageReader.setOnImageAvailableListener(null, null)
             newImageReader.close()
             newPreviewSurface.release()
-            camera.close()
+            if (!isCurrent(callbackGeneration)) {
+                camera.close()
+            }
             return
         }
 
-        selectedMode = mode
-        readerGeneration = callbackReaderGeneration
-        previewSurface = newPreviewSurface
-        imageReader = newImageReader
-        emitStatusFromCallingThread("Trying camera mode ${mode.statusLabel()} (${remainingModes.size} fallback modes remain)")
-        createCaptureSession(camera, mode, callbackGeneration)
+        emitStatusFromCallingThread(
+            "Trying camera mode ${setup.mode.statusLabel()} (${setup.remainingModeCount} fallback modes remain)",
+        )
+        createCaptureSession(
+            camera = camera,
+            mode = setup.mode,
+            frameGeneration = frameGeneration,
+            preview = newPreviewSurface,
+            reader = newImageReader,
+        )
     }
 
     private fun createImageReader(
@@ -372,7 +459,7 @@ class CameraCaptureController(
         ImageReader.newInstance(mode.width, mode.height, ImageFormat.YUV_420_888, MAX_IMAGES).apply {
             setOnImageAvailableListener(
                 { reader ->
-                    if (!isCurrent(callbackGeneration) || callbackReaderGeneration != readerGeneration) {
+                    if (!isCurrent(FrameGeneration(callbackGeneration, callbackReaderGeneration))) {
                         return@setOnImageAvailableListener
                     }
 
@@ -382,123 +469,175 @@ class CameraCaptureController(
                         return@setOnImageAvailableListener
                     } ?: return@setOnImageAvailableListener
 
-                    try {
-                        if (!isCurrent(callbackGeneration) || callbackReaderGeneration != readerGeneration) {
-                            return@setOnImageAvailableListener
-                        }
-
-                        val yPlane = image.planes.getOrNull(0)
-                        val uPlane = image.planes.getOrNull(1)
-                        val vPlane = image.planes.getOrNull(2)
-                        val yBuffer = yPlane?.buffer
-                        val uBuffer = uPlane?.buffer
-                        val vBuffer = vPlane?.buffer
-                        val firstLuma = if (yBuffer != null && yBuffer.remaining() > 0) {
-                            yBuffer.get(0).toInt() and 0xFF
-                        } else {
-                            null
-                        }
-                        val launchZone = launchZoneProvider()
-                        var autoTrackingState: AutoShotTrackerState? = null
-                        val detectionResult = if (
-                            yPlane != null && uPlane != null && vPlane != null &&
-                            yBuffer != null && uBuffer != null && vBuffer != null
-                        ) {
-                            val mapper = coordinateMapper
-                            val lumaFrame = YuvFrameExtractor.extractLuma(
-                                yBuffer = yBuffer,
-                                width = image.width,
-                                height = image.height,
-                                yRowStride = yPlane.rowStride,
-                                yPixelStride = yPlane.pixelStride,
-                            )
-                            val motionResult = detector.analyzeFrame(lumaFrame, image.timestamp, mapper)
-                            val crop = mapper.viewZoneToFrameZone(launchZone).cropBounds(image.width, image.height)
-                            val zoneFrame = YuvFrameExtractor.extractCrop(
-                                yBuffer = yBuffer,
-                                uBuffer = uBuffer,
-                                vBuffer = vBuffer,
-                                sourceWidth = image.width,
-                                sourceHeight = image.height,
-                                cropLeft = crop.left,
-                                cropTop = crop.top,
-                                cropWidth = crop.width,
-                                cropHeight = crop.height,
-                                yRowStride = yPlane.rowStride,
-                                yPixelStride = yPlane.pixelStride,
-                                uRowStride = uPlane.rowStride,
-                                uPixelStride = uPlane.pixelStride,
-                                vRowStride = vPlane.rowStride,
-                                vPixelStride = vPlane.pixelStride,
-                            )
-                            autoTrackingState = tracker.updateFromLaunchZoneCrop(
-                                zoneFrame = zoneFrame,
-                                result = motionResult,
-                                launchZone = launchZone,
-                                mapper = mapper,
-                                cropLeftPx = crop.left,
-                                cropTopPx = crop.top,
-                                sourceWidth = image.width,
-                                sourceHeight = image.height,
-                            )
-                            maybeLogZoneCrop(
-                                timestampNs = image.timestamp,
-                                zoneFrame = zoneFrame,
-                                state = autoTrackingState,
-                                mapper = mapper,
-                                crop = crop,
-                                sourceWidth = image.width,
-                                sourceHeight = image.height,
-                            )
-                            motionResult
-                        } else {
-                            null
-                        }
-                        val trackingState = autoTrackingState?.trackingState
-                        val visibleDetectionResult = detectionResult?.copy(
-                            candidates = DetectionDebugFilter.visibleCandidates(
-                                trackerState = autoTrackingState,
-                                launchZone = launchZone,
-                                trackingState = trackingState,
-                            ),
-                        )
-
-                        frameCount += 1
-                        lastFps = fpsCounter.recordFrame(image.timestamp)
-                        if (visibleDetectionResult != null) {
-                            maybeEmitDetectionResult(image.timestamp, visibleDetectionResult)
-                        }
-                        if (trackingState != null) {
-                            maybeEmitTrackingState(image.timestamp, trackingState)
-                        }
-                        if (autoTrackingState != null) {
-                            onAutoTrackingState(autoTrackingState)
-                        }
-                        maybeEmitFrameStatus(mode, image.timestamp, firstLuma, detectionResult, autoTrackingState)
-                    } finally {
+                    if (!analysisGate.tryStartAnalysis()) {
                         image.close()
+                        return@setOnImageAvailableListener
+                    }
+
+                    val handler = analysisHandler
+                    if (handler == null) {
+                        try {
+                            image.close()
+                        } finally {
+                            analysisGate.finishAnalysis()
+                        }
+                        return@setOnImageAvailableListener
+                    }
+
+                    val posted = handler.post {
+                        try {
+                            try {
+                                analyzeImage(image, mode, callbackGeneration, callbackReaderGeneration)
+                            } catch (exception: Exception) {
+                                dispatchAnalysisCallback(
+                                    FrameGeneration(callbackGeneration, callbackReaderGeneration),
+                                ) {
+                                    onStatus("Analysis frame failed: ${exception.statusDetail()}")
+                                }
+                            }
+                        } finally {
+                            try {
+                                image.close()
+                            } finally {
+                                analysisGate.finishAnalysis()
+                            }
+                        }
+                    }
+                    if (!posted) {
+                        try {
+                            image.close()
+                        } finally {
+                            analysisGate.finishAnalysis()
+                        }
                     }
                 },
                 backgroundHandler,
             )
         }
+    private fun analyzeImage(
+        image: Image,
+        mode: CaptureMode,
+        callbackGeneration: Int,
+        callbackReaderGeneration: Int,
+    ) {
+        val frameGeneration = FrameGeneration(callbackGeneration, callbackReaderGeneration)
+        if (!isCurrent(frameGeneration)) {
+            return
+        }
 
+        val yPlane = image.planes.getOrNull(0)
+        val uPlane = image.planes.getOrNull(1)
+        val vPlane = image.planes.getOrNull(2)
+        val yBuffer = yPlane?.buffer
+        val uBuffer = uPlane?.buffer
+        val vBuffer = vPlane?.buffer
+        val firstLuma = if (yBuffer != null && yBuffer.remaining() > 0) {
+            yBuffer.get(0).toInt() and 0xFF
+        } else {
+            null
+        }
+        val launchZone = launchZoneProvider()
+        var autoTrackingState: AutoShotTrackerState? = null
+        val detectionResult = if (
+            yPlane != null && uPlane != null && vPlane != null &&
+            yBuffer != null && uBuffer != null && vBuffer != null
+        ) {
+            val mapper = coordinateMapper
+            val lumaFrame = YuvFrameExtractor.extractLuma(
+                yBuffer = yBuffer,
+                width = image.width,
+                height = image.height,
+                yRowStride = yPlane.rowStride,
+                yPixelStride = yPlane.pixelStride,
+            )
+            val motionResult = detector.analyzeFrame(lumaFrame, image.timestamp, mapper)
+            val crop = mapper.viewZoneToFrameZone(launchZone).cropBounds(image.width, image.height)
+            val zoneFrame = YuvFrameExtractor.extractCrop(
+                yBuffer = yBuffer,
+                uBuffer = uBuffer,
+                vBuffer = vBuffer,
+                sourceWidth = image.width,
+                sourceHeight = image.height,
+                cropLeft = crop.left,
+                cropTop = crop.top,
+                cropWidth = crop.width,
+                cropHeight = crop.height,
+                yRowStride = yPlane.rowStride,
+                yPixelStride = yPlane.pixelStride,
+                uRowStride = uPlane.rowStride,
+                uPixelStride = uPlane.pixelStride,
+                vRowStride = vPlane.rowStride,
+                vPixelStride = vPlane.pixelStride,
+            )
+            autoTrackingState = tracker.updateFromLaunchZoneCrop(
+                zoneFrame = zoneFrame,
+                result = motionResult,
+                launchZone = launchZone,
+                mapper = mapper,
+                cropLeftPx = crop.left,
+                cropTopPx = crop.top,
+                sourceWidth = image.width,
+                sourceHeight = image.height,
+            )
+            maybeLogZoneCrop(
+                timestampNs = image.timestamp,
+                zoneFrame = zoneFrame,
+                state = autoTrackingState,
+                mapper = mapper,
+                crop = crop,
+                sourceWidth = image.width,
+                sourceHeight = image.height,
+            )
+            motionResult
+        } else {
+            null
+        }
+        val trackingState = autoTrackingState?.trackingState
+        val visibleDetectionResult = detectionResult?.copy(
+            candidates = DetectionDebugFilter.visibleCandidates(
+                trackerState = autoTrackingState,
+                launchZone = launchZone,
+                trackingState = trackingState,
+            ),
+        )
 
-    private fun maybeEmitDetectionResult(timestampNs: Long, result: LumaMotionResult) {
+        frameCount += 1
+        lastFps = fpsCounter.recordFrame(image.timestamp)
+        if (visibleDetectionResult != null) {
+            maybeEmitDetectionResult(image.timestamp, visibleDetectionResult, frameGeneration)
+        }
+        if (trackingState != null) {
+            maybeEmitTrackingState(image.timestamp, trackingState, frameGeneration)
+        }
+        if (autoTrackingState != null) {
+            dispatchAnalysisCallback(frameGeneration) { onAutoTrackingState(autoTrackingState) }
+        }
+        maybeEmitFrameStatus(mode, image.timestamp, firstLuma, detectionResult, autoTrackingState, frameGeneration)
+    }
+
+    private fun maybeEmitDetectionResult(
+        timestampNs: Long,
+        result: LumaMotionResult,
+        frameGeneration: FrameGeneration,
+    ) {
         if (lastDetectionOverlayTimestampNs != 0L && timestampNs - lastDetectionOverlayTimestampNs < DETECTION_OVERLAY_INTERVAL_NS) {
             return
         }
 
         lastDetectionOverlayTimestampNs = timestampNs
-        onDetectionResult(result)
+        dispatchAnalysisCallback(frameGeneration) { onDetectionResult(result) }
     }
 
-    private fun maybeEmitTrackingState(timestampNs: Long, state: ShotTrackerState) {
+    private fun maybeEmitTrackingState(
+        timestampNs: Long,
+        state: ShotTrackerState,
+        frameGeneration: FrameGeneration,
+    ) {
         if (lastDetectionOverlayTimestampNs != timestampNs) {
             return
         }
 
-        onTrackingState(state)
+        dispatchAnalysisCallback(frameGeneration) { onTrackingState(state) }
     }
 
     private fun maybeEmitFrameStatus(
@@ -507,6 +646,7 @@ class CameraCaptureController(
         firstLuma: Int?,
         detectionResult: LumaMotionResult?,
         autoTrackingState: AutoShotTrackerState?,
+        frameGeneration: FrameGeneration,
     ) {
         if (lastStatusTimestampNs != 0L && timestampNs - lastStatusTimestampNs < STATUS_INTERVAL_NS) {
             return
@@ -520,9 +660,11 @@ class CameraCaptureController(
         val trackingLabel = trackingState?.status ?: ShotTrackerStatus.Idle
         val trackPointCount = trackingState?.points?.size ?: 0
         val shotLabel = autoTrackingState?.status ?: tracker.status
-        val stillDebug = autoTrackingState?.acquisitionDebug?.statusSummary(aeAwbLocked = true) ?: "cal=n/a"
+        val stillDebug = autoTrackingState?.acquisitionDebug?.statusSummary(
+            aeAwbLocked = requestPolicy.autoExposureLock || requestPolicy.autoWhiteBalanceLock,
+        ) ?: "cal=n/a"
         val firstLumaLabel = firstLuma?.toString() ?: "n/a"
-        emitStatusFromCallingThread(
+        val statusMessage =
             "Camera " + mode.statusLabel() + " rot=" + coordinateMapper.rotationDegrees +
                 " frames=" + frameCount +
                 " fps=" + lastFps.formatFps() +
@@ -533,16 +675,22 @@ class CameraCaptureController(
                 " shot=" + shotLabel +
                 " track=" + trackingLabel +
                 " points=" + trackPointCount +
-                " ball={" + stillDebug + "}",
-        )
+                " ball={" + stillDebug + "}"
+        dispatchAnalysisCallback(frameGeneration) { onStatus(statusMessage) }
     }
 
-    private fun createCaptureSession(camera: CameraDevice, mode: CaptureMode, callbackGeneration: Int) {
+    private fun createCaptureSession(
+        camera: CameraDevice,
+        mode: CaptureMode,
+        frameGeneration: FrameGeneration,
+        preview: Surface,
+        reader: ImageReader,
+    ) {
         val handler = backgroundHandler
-        val preview = previewSurface
-        val reader = imageReader
-        if (handler == null || preview == null || reader == null) {
-            tryNextMode(camera, callbackGeneration, "capture session prerequisites missing")
+        if (handler == null || !isCurrent(frameGeneration)) {
+            if (isCurrent(frameGeneration)) {
+                tryNextMode(camera, frameGeneration.camera, "capture session prerequisites missing")
+            }
             return
         }
 
@@ -551,28 +699,53 @@ class CameraCaptureController(
                 listOf(preview, reader.surface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
-                        if (!isCurrent(callbackGeneration)) {
+                        val published = resourceCoordinator.publishIfCurrent(
+                            isCurrent = {
+                                isCurrent(frameGeneration) &&
+                                    imageReader === reader &&
+                                    previewSurface === preview
+                            },
+                            publish = {
+                                captureSession = session
+                                analysisGate.resume()
+                            },
+                        )
+                        if (!published) {
                             session.close()
                             return
                         }
 
-                        captureSession = session
-                        startRepeatingRequest(camera, session, preview, reader.surface, mode, callbackGeneration)
+                        startRepeatingRequest(
+                            camera,
+                            session,
+                            preview,
+                            reader.surface,
+                            mode,
+                            frameGeneration,
+                        )
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         session.close()
-                        if (!isCurrent(callbackGeneration)) {
-                            return
+                        if (isCurrent(frameGeneration)) {
+                            tryNextMode(
+                                camera,
+                                frameGeneration.camera,
+                                "session configuration failed for ${mode.statusLabel()}",
+                            )
                         }
-
-                        tryNextMode(camera, callbackGeneration, "session configuration failed for ${mode.statusLabel()}")
                     }
                 },
                 handler,
             )
         } catch (exception: Exception) {
-            tryNextMode(camera, callbackGeneration, "failed to create session for ${mode.statusLabel()}: ${exception.statusDetail()}")
+            if (isCurrent(frameGeneration)) {
+                tryNextMode(
+                    camera,
+                    frameGeneration.camera,
+                    "failed to create session for ${mode.statusLabel()}: ${exception.statusDetail()}",
+                )
+            }
         }
     }
 
@@ -582,9 +755,9 @@ class CameraCaptureController(
         preview: Surface,
         analysis: Surface,
         mode: CaptureMode,
-        callbackGeneration: Int,
+        frameGeneration: FrameGeneration,
     ) {
-        if (!isCurrent(callbackGeneration)) {
+        if (!isCurrent(frameGeneration)) {
             session.close()
             return
         }
@@ -593,15 +766,24 @@ class CameraCaptureController(
             val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(preview)
                 addTarget(analysis)
+                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
                 set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(mode.minFps, mode.maxFps))
-                set(CaptureRequest.CONTROL_AE_LOCK, true)
-                set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                set(CaptureRequest.CONTROL_AE_LOCK, requestPolicy.autoExposureLock)
+                set(CaptureRequest.CONTROL_AWB_LOCK, requestPolicy.autoWhiteBalanceLock)
             }.build()
 
             session.setRepeatingRequest(request, null, backgroundHandler)
             emitStatusFromCallingThread("Camera running ${mode.statusLabel()} frames=0 fps=0.0 y0=n/a")
         } catch (exception: Exception) {
-            tryNextMode(camera, callbackGeneration, "failed to start ${mode.statusLabel()}: ${exception.statusDetail()}")
+            if (isCurrent(frameGeneration)) {
+                tryNextMode(
+                    camera,
+                    frameGeneration.camera,
+                    "failed to start ${mode.statusLabel()}: ${exception.statusDetail()}",
+                )
+            }
         }
     }
 
@@ -610,47 +792,56 @@ class CameraCaptureController(
         callbackGeneration: Int,
         status: String,
     ) {
-        if (!isCurrent(callbackGeneration)) {
+        val handled = resourceCoordinator.mutate {
+            if (!isCurrent(callbackGeneration)) {
+                false
+            } else {
+                openingCamera = false
+                closeActiveCaptureResourcesLocked(releasePreviewSurface = true)
+                if (cameraDevice !== camera) {
+                    cameraDevice?.close()
+                }
+                cameraDevice = null
+                camera.close()
+                selectedMode = null
+                remainingModes.clear()
+                true
+            }
+        }
+        if (!handled) {
             camera.close()
             return
         }
-
-        openingCamera = false
-        status.let(::emitStatusFromCallingThread)
-        closeActiveCaptureResources(releasePreviewSurface = true)
-        if (cameraDevice !== camera) {
-            cameraDevice?.close()
-        }
-        cameraDevice = null
-        camera.close()
-        selectedMode = null
-        remainingModes.clear()
-        resetFrameStats()
+        emitStatusFromCallingThread(status)
     }
 
     private fun closeCameraResourcesFromCallback(callbackGeneration: Int, status: String?) {
-        if (!isCurrent(callbackGeneration)) {
-            return
+        val handled = resourceCoordinator.mutate {
+            if (!isCurrent(callbackGeneration)) {
+                false
+            } else {
+                closeActiveCaptureResourcesLocked(releasePreviewSurface = true)
+                cameraDevice?.close()
+                cameraDevice = null
+                selectedMode = null
+                remainingModes.clear()
+                true
+            }
         }
-
-        status?.let(::emitStatusFromCallingThread)
-        closeActiveCaptureResources(releasePreviewSurface = true)
-        cameraDevice?.close()
-        cameraDevice = null
-        selectedMode = null
-        remainingModes.clear()
-        resetFrameStats()
+        if (handled) {
+            status?.let(::emitStatusFromCallingThread)
+        }
     }
 
-    private fun closeActiveCaptureResources(releasePreviewSurface: Boolean) {
+    private fun closeActiveCaptureResourcesLocked(releasePreviewSurface: Boolean) {
         captureSession?.close()
         captureSession = null
 
+        val reader = imageReader
+        reader?.setOnImageAvailableListener(null, null)
         readerGeneration += 1
-        imageReader?.let { reader ->
-            reader.setOnImageAvailableListener(null, null)
-            reader.close()
-        }
+        analysisGate.pauseAndAwaitIdle()
+        reader?.close()
         imageReader = null
 
         previewSurface?.release()
@@ -677,8 +868,15 @@ class CameraCaptureController(
 
     private fun isCurrent(callbackGeneration: Int): Boolean = started && generation == callbackGeneration
 
+    private fun isCurrent(frameGeneration: FrameGeneration): Boolean =
+        isCurrent(frameGeneration.camera) && readerGeneration == frameGeneration.reader
+
     private fun emitStatusFromCallingThread(message: String) {
         onStatus(message)
+    }
+
+    private fun dispatchAnalysisCallback(frameGeneration: FrameGeneration, callback: () -> Unit) {
+        callbackDispatcher.dispatch(frameGeneration, callback)
     }
 
     private fun CaptureMode.statusLabel(): String = "${width}x$height @ ${minFps}-${maxFps}fps standard"
@@ -782,6 +980,12 @@ class CameraCaptureController(
         val height: Int,
     )
 
+    private data class ModeSetup(
+        val mode: CaptureMode,
+        val texture: SurfaceTexture,
+        val readerGeneration: Int,
+        val remainingModeCount: Int,
+    )
     private data class CameraConfig(
         val cameraId: String,
         val rankedModes: List<CaptureMode>,
@@ -795,5 +999,3 @@ class CameraCaptureController(
         const val CROP_LOG_INTERVAL_NS = 1_000_000_000L
     }
 }
-
-
