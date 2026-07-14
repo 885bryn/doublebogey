@@ -3,6 +3,7 @@ package com.doublebogey.golftracer.camera
 import kotlin.math.hypot
 
 enum class AutoShotTrackerStatus {
+    @Deprecated("Temporary compile shim; tracker lifecycle is calibration-free")
     Calibrating,
     Searching,
     BallLocked,
@@ -11,7 +12,7 @@ enum class AutoShotTrackerStatus {
 }
 
 data class AutoShotTrackerConfig(
-    val stableFramesRequired: Int = 5,
+    val stableFramesRequired: Int = 1,
     val maxStableDistance: Double = 0.025,
     val maxLaunchDistance: Double = 0.30,
     val lostBallFrames: Int = 50,
@@ -38,10 +39,9 @@ data class AutoShotTrackerState(
 class AutoShotTracker(
     private val delegate: ShotTracker = ShotTracker(),
     private val detector: ZoneBallDetector = ZoneBallDetector(),
-    private val motionMeter: ZoneMotionMeter = ZoneMotionMeter(),
     private val config: AutoShotTrackerConfig = AutoShotTrackerConfig(),
 ) {
-    var status = AutoShotTrackerStatus.Calibrating
+    var status = AutoShotTrackerStatus.Searching
         private set
 
     private var activeLaunchZone: LaunchZone? = null
@@ -60,22 +60,15 @@ class AutoShotTracker(
         mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
     ): AutoShotTrackerState {
         if (activeLaunchZone != launchZone) {
-            beginCalibration(launchZone, preserveDebug = false)
+            resetAcquisition(launchZone)
         }
 
         if (status == AutoShotTrackerStatus.Reviewing) {
             if (result.timestampNs - reviewStartedNs >= config.reviewHoldNs) {
-                delegate.reset()
-                frozenTrackingState = null
-                clearLock()
-                status = AutoShotTrackerStatus.Searching
+                resetAcquisition(launchZone)
             } else {
                 return currentState()
             }
-        }
-
-        if (status == AutoShotTrackerStatus.Calibrating) {
-            return updateCalibration(frame, launchZone, mapper)
         }
 
         if (status == AutoShotTrackerStatus.Tracking) {
@@ -90,10 +83,6 @@ class AutoShotTracker(
 
         val stillDetection = detector.analyzeFrame(frame, launchZone, mapper)
         lastAcquisitionDebug = stillDetection.debug
-        if (stillDetection.debug.backgroundStale) {
-            beginCalibration(launchZone, preserveDebug = true)
-            return currentState()
-        }
 
         when (status) {
             AutoShotTrackerStatus.Searching -> updateBallLock(stillDetection.acceptedCandidate, launchZone, result.timestampNs)
@@ -139,34 +128,15 @@ class AutoShotTracker(
         }
 
         if (activeLaunchZone != launchZone) {
-            beginCalibration(launchZone, preserveDebug = false, detectorZone = detectorZone)
+            resetAcquisition(launchZone)
         }
 
         if (status == AutoShotTrackerStatus.Reviewing) {
             if (result.timestampNs - reviewStartedNs >= config.reviewHoldNs) {
-                delegate.reset()
-                frozenTrackingState = null
-                clearLock()
-                status = AutoShotTrackerStatus.Searching
+                resetAcquisition(launchZone)
             } else {
                 return currentState()
             }
-        }
-
-        if (status == AutoShotTrackerStatus.Calibrating) {
-            val motion = motionMeter.measure(zoneFrame, detectorZone, FrameCoordinateMapper.Identity)
-            if (!motion.quiet) {
-                beginCalibration(launchZone, preserveDebug = false, detectorZone = detectorZone)
-                return currentState()
-            }
-
-            val detection = detector.collectCalibrationFrame(zoneFrame, detectorZone, FrameCoordinateMapper.Identity)
-                .mapCandidates(mapCandidate)
-            lastAcquisitionDebug = detection.debug
-            if (detector.calibrationState == ZoneBallCalibrationState.Calibrated) {
-                status = AutoShotTrackerStatus.Searching
-            }
-            return currentState()
         }
 
         if (status == AutoShotTrackerStatus.Tracking) {
@@ -182,10 +152,6 @@ class AutoShotTracker(
         val stillDetection = detector.analyzeFrame(zoneFrame, detectorZone, FrameCoordinateMapper.Identity)
             .mapCandidates(mapCandidate)
         lastAcquisitionDebug = stillDetection.debug
-        if (stillDetection.debug.backgroundStale) {
-            beginCalibration(launchZone, preserveDebug = true, detectorZone = detectorZone)
-            return currentState()
-        }
 
         when (status) {
             AutoShotTrackerStatus.Searching -> updateBallLock(stillDetection.acceptedCandidate, launchZone, result.timestampNs)
@@ -202,7 +168,6 @@ class AutoShotTracker(
     }
 
     fun update(result: LumaMotionResult, launchZone: LaunchZone): AutoShotTrackerState {
-        if (status == AutoShotTrackerStatus.Calibrating) status = AutoShotTrackerStatus.Searching
         if (status == AutoShotTrackerStatus.Reviewing) return currentState()
 
         if (status == AutoShotTrackerStatus.Tracking) {
@@ -226,57 +191,18 @@ class AutoShotTracker(
     }
 
     fun reset() {
+        resetAcquisition(null)
+    }
+
+    private fun resetAcquisition(launchZone: LaunchZone?) {
         delegate.reset()
         detector.reset()
-        motionMeter.reset()
-        activeLaunchZone = null
-        status = AutoShotTrackerStatus.Calibrating
-        lockCandidate = null
-        lockTimestampNs = 0L
-        stableFrameCount = 0
-        lostFrameCount = 0
-        frozenTrackingState = null
-        reviewStartedNs = 0L
-        lastAcquisitionDebug = ZoneBallDebug()
-    }
-
-    private fun updateCalibration(
-        frame: YuvFrame,
-        launchZone: LaunchZone,
-        mapper: FrameCoordinateMapper,
-    ): AutoShotTrackerState {
-        val motion = motionMeter.measure(frame, launchZone, mapper)
-        if (!motion.quiet) {
-            beginCalibration(launchZone, preserveDebug = false)
-            return currentState()
-        }
-
-        val detection = detector.collectCalibrationFrame(frame, launchZone, mapper)
-        lastAcquisitionDebug = detection.debug
-        if (detector.calibrationState == ZoneBallCalibrationState.Calibrated) {
-            status = AutoShotTrackerStatus.Searching
-        }
-        return currentState()
-    }
-
-    private fun beginCalibration(
-        launchZone: LaunchZone,
-        preserveDebug: Boolean,
-        detectorZone: LaunchZone = launchZone,
-    ) {
-        delegate.reset()
-        detector.startCalibration(detectorZone)
-        motionMeter.reset()
         activeLaunchZone = launchZone
         clearLock()
         frozenTrackingState = null
         reviewStartedNs = 0L
-        status = AutoShotTrackerStatus.Calibrating
-        if (!preserveDebug) {
-            lastAcquisitionDebug = ZoneBallDebug(
-                calibrationState = ZoneBallCalibrationState.Calibrating,
-            )
-        }
+        status = AutoShotTrackerStatus.Searching
+        lastAcquisitionDebug = ZoneBallDebug()
     }
 
     private fun updateBallLock(candidate: LumaMotionCandidate?, launchZone: LaunchZone, timestampNs: Long) {

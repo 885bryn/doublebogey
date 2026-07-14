@@ -8,26 +8,29 @@ import kotlin.test.assertTrue
 class AutoShotTrackerLifecycleTest {
     private val zone = LaunchZone(left = 0.0, top = 0.60, width = 1.0, height = 0.40)
     private val detectorConfig = ZoneBallDetectorConfig(
-        calibrationFramesRequired = 2,
         lockThreshold = 8.0,
     )
 
     @Test
-    fun calibratesLocksLaunchesReviewsThenAutomaticallyRearms() {
+    fun searchesLocksLaunchesReviewsThenAutomaticallyRearms() {
         val tracker = tracker(reviewHoldNs = 100L)
 
-        assertEquals(AutoShotTrackerStatus.Calibrating, tracker.update(emptyMatFrame(), resultAt(0L), zone).status)
-        assertEquals(AutoShotTrackerStatus.Searching, tracker.update(emptyMatFrame(), resultAt(33L), zone).status)
-        assertEquals(AutoShotTrackerStatus.Searching, tracker.update(ballFrame(), resultAt(66L), zone).status)
-        repeat(4) { index -> tracker.update(ballFrame(), resultAt(99L + index * 33L), zone) }
-        val locked = tracker.update(ballFrame(), resultAt(231L), zone)
+        assertEquals(AutoShotTrackerStatus.Searching, tracker.status)
+        assertEquals(AutoShotTrackerStatus.Searching, tracker.update(emptyMatFrame(), resultAt(0L), zone).status)
+        repeat(4) { index ->
+            assertEquals(
+                AutoShotTrackerStatus.Searching,
+                tracker.update(ballFrame(), resultAt(33L + index * 33L), zone).status,
+            )
+        }
+        val locked = tracker.update(ballFrame(), resultAt(165L), zone)
 
         assertEquals(AutoShotTrackerStatus.BallLocked, locked.status, locked.acquisitionDebug.statusSummary())
         assertNotNull(locked.lockedBall)
 
         val launched = tracker.update(
             emptyMatFrame(),
-            resultAt(264L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.52))),
+            resultAt(198L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.52))),
             zone,
         )
 
@@ -37,15 +40,15 @@ class AutoShotTrackerLifecycleTest {
 
         tracker.update(
             emptyMatFrame(),
-            resultAt(297L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.24))),
+            resultAt(231L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.24))),
             zone,
         )
-        val reviewing = tracker.update(emptyMatFrame(), resultAt(330L), zone)
+        val reviewing = tracker.update(emptyMatFrame(), resultAt(264L), zone)
 
         assertEquals(AutoShotTrackerStatus.Reviewing, reviewing.status, reviewing.toString())
         assertTrue(reviewing.trackingState.points.isNotEmpty())
 
-        val rearmed = tracker.update(emptyMatFrame(), resultAt(463L), zone)
+        val rearmed = tracker.update(emptyMatFrame(), resultAt(397L), zone)
 
         assertEquals(AutoShotTrackerStatus.Searching, rearmed.status)
         assertEquals(ShotTrackerStatus.Idle, rearmed.trackingState.status)
@@ -53,33 +56,34 @@ class AutoShotTrackerLifecycleTest {
     }
 
     @Test
-    fun restartsCalibrationWhenZoneMotionOccursDuringCalibration() {
+    fun emptyMatRemainsSearching() {
         val tracker = tracker()
 
-        tracker.update(emptyMatFrame(), resultAt(0L), zone)
-        val moving = tracker.update(ballFrame(), resultAt(33L), zone)
+        val first = tracker.update(emptyMatFrame(), resultAt(0L), zone)
+        val second = tracker.update(emptyMatFrame(), resultAt(33L), zone)
 
-        assertEquals(AutoShotTrackerStatus.Calibrating, moving.status)
-        assertEquals(0, moving.acquisitionDebug.calibrationFramesCollected)
+        assertEquals(AutoShotTrackerStatus.Searching, first.status)
+        assertEquals(AutoShotTrackerStatus.Searching, second.status)
+        assertEquals(null, second.lockedBall)
     }
 
     @Test
-    fun recalibratesWhenLaunchZoneChanges() {
+    fun launchZoneChangeResetsDetectorConfirmationWhileSearching() {
         val tracker = tracker()
-        tracker.update(emptyMatFrame(), resultAt(0L), zone)
-        tracker.update(emptyMatFrame(), resultAt(33L), zone)
+        repeat(4) { index -> tracker.update(ballFrame(), resultAt(index * 33L), zone) }
 
         val movedZone = zone.copy(left = 0.05, width = 0.90)
-        val state = tracker.update(emptyMatFrame(), resultAt(66L), movedZone)
+        val state = tracker.update(ballFrame(), resultAt(132L), movedZone)
 
-        assertEquals(AutoShotTrackerStatus.Calibrating, state.status)
-        assertEquals(1, state.acquisitionDebug.calibrationFramesCollected)
+        assertEquals(AutoShotTrackerStatus.Searching, state.status)
+        assertEquals(1, state.acquisitionDebug.confirmationHits)
+        assertEquals(null, state.lockedBall)
     }
 
     @Test
     fun unlocksWhenTheStillBallDisappearsForTooLong() {
         val tracker = tracker(lostBallFrames = 2)
-        calibrateAndLock(tracker)
+        confirmAndLock(tracker)
 
         assertEquals(AutoShotTrackerStatus.BallLocked, tracker.update(emptyMatFrame(), resultAt(264L), zone).status)
         val unlocked = tracker.update(emptyMatFrame(), resultAt(297L), zone)
@@ -91,7 +95,7 @@ class AutoShotTrackerLifecycleTest {
     @Test
     fun ignoresBackswingMotionWhileStillBallRemainsAtTheLock() {
         val tracker = tracker()
-        calibrateAndLock(tracker)
+        confirmAndLock(tracker)
 
         val state = tracker.update(
             ballFrame(),
@@ -101,18 +105,6 @@ class AutoShotTrackerLifecycleTest {
 
         assertEquals(AutoShotTrackerStatus.BallLocked, state.status)
         assertEquals(ShotTrackerStatus.Idle, state.trackingState.status)
-    }
-
-    @Test
-    fun globalLumaShiftDoesNotForceBackgroundRecalibration() {
-        val tracker = tracker()
-        tracker.update(emptyMatFrame(), resultAt(0L), zone)
-        tracker.update(emptyMatFrame(), resultAt(33L), zone)
-
-        val shifted = tracker.update(emptyMatFrame(globalYShift = 25), resultAt(66L), zone)
-
-        assertEquals(AutoShotTrackerStatus.Searching, shifted.status)
-        assertEquals(false, shifted.acquisitionDebug.backgroundStale)
     }
 
     @Test
@@ -213,21 +205,16 @@ class AutoShotTrackerLifecycleTest {
                 ),
             ),
             detector = ZoneBallDetector(detectorConfig),
-            motionMeter = ZoneMotionMeter(),
             config = AutoShotTrackerConfig(
-                stableFramesRequired = 2,
                 maxLaunchDistance = 0.30,
                 lostBallFrames = lostBallFrames,
                 reviewHoldNs = reviewHoldNs,
             ),
         )
 
-    private fun calibrateAndLock(tracker: AutoShotTracker) {
-        tracker.update(emptyMatFrame(), resultAt(0L), zone)
-        tracker.update(emptyMatFrame(), resultAt(33L), zone)
-        tracker.update(ballFrame(), resultAt(66L), zone)
-        repeat(4) { index -> tracker.update(ballFrame(), resultAt(99L + index * 33L), zone) }
-        val locked = tracker.update(ballFrame(), resultAt(231L), zone)
+    private fun confirmAndLock(tracker: AutoShotTracker) {
+        repeat(4) { index -> tracker.update(ballFrame(), resultAt(index * 33L), zone) }
+        val locked = tracker.update(ballFrame(), resultAt(132L), zone)
         assertEquals(AutoShotTrackerStatus.BallLocked, locked.status, locked.acquisitionDebug.statusSummary())
     }
 

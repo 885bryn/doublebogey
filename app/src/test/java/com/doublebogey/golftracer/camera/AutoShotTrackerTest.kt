@@ -107,8 +107,22 @@ class AutoShotTrackerTest {
 
         val reset = tracker.resetForNextShot()
 
-        assertEquals(AutoShotTrackerStatus.Calibrating, reset.status)
+        assertEquals(AutoShotTrackerStatus.Searching, reset.status)
         assertEquals(0, reset.trackingState.points.size)
+    }
+
+    @Test
+    fun newTrackerStartsSearchingAndDefaultConfigLocksConfirmedCandidateImmediately() {
+        val tracker = AutoShotTracker()
+
+        assertEquals(AutoShotTrackerStatus.Searching, tracker.status)
+
+        val locked = tracker.update(
+            resultAt(0L, stillCandidates = listOf(candidate(x = 0.50, y = 0.80))),
+            zone,
+        )
+
+        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status)
     }
 
     private fun resultAt(
