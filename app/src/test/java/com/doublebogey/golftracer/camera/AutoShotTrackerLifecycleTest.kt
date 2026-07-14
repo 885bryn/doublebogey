@@ -19,14 +19,15 @@ class AutoShotTrackerLifecycleTest {
         assertEquals(AutoShotTrackerStatus.Calibrating, tracker.update(emptyMatFrame(), resultAt(0L), zone).status)
         assertEquals(AutoShotTrackerStatus.Searching, tracker.update(emptyMatFrame(), resultAt(33L), zone).status)
         assertEquals(AutoShotTrackerStatus.Searching, tracker.update(ballFrame(), resultAt(66L), zone).status)
-        val locked = tracker.update(ballFrame(), resultAt(99L), zone)
+        repeat(4) { index -> tracker.update(ballFrame(), resultAt(99L + index * 33L), zone) }
+        val locked = tracker.update(ballFrame(), resultAt(231L), zone)
 
-        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status)
+        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status, locked.acquisitionDebug.statusSummary())
         assertNotNull(locked.lockedBall)
 
         val launched = tracker.update(
             emptyMatFrame(),
-            resultAt(132L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.52))),
+            resultAt(264L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.52))),
             zone,
         )
 
@@ -36,15 +37,15 @@ class AutoShotTrackerLifecycleTest {
 
         tracker.update(
             emptyMatFrame(),
-            resultAt(165L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.24))),
+            resultAt(297L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.24))),
             zone,
         )
-        val reviewing = tracker.update(emptyMatFrame(), resultAt(198L), zone)
+        val reviewing = tracker.update(emptyMatFrame(), resultAt(330L), zone)
 
         assertEquals(AutoShotTrackerStatus.Reviewing, reviewing.status, reviewing.toString())
         assertTrue(reviewing.trackingState.points.isNotEmpty())
 
-        val rearmed = tracker.update(emptyMatFrame(), resultAt(331L), zone)
+        val rearmed = tracker.update(emptyMatFrame(), resultAt(463L), zone)
 
         assertEquals(AutoShotTrackerStatus.Searching, rearmed.status)
         assertEquals(ShotTrackerStatus.Idle, rearmed.trackingState.status)
@@ -80,8 +81,8 @@ class AutoShotTrackerLifecycleTest {
         val tracker = tracker(lostBallFrames = 2)
         calibrateAndLock(tracker)
 
-        assertEquals(AutoShotTrackerStatus.BallLocked, tracker.update(emptyMatFrame(), resultAt(132L), zone).status)
-        val unlocked = tracker.update(emptyMatFrame(), resultAt(165L), zone)
+        assertEquals(AutoShotTrackerStatus.BallLocked, tracker.update(emptyMatFrame(), resultAt(264L), zone).status)
+        val unlocked = tracker.update(emptyMatFrame(), resultAt(297L), zone)
 
         assertEquals(AutoShotTrackerStatus.Searching, unlocked.status)
         assertEquals(null, unlocked.lockedBall)
@@ -94,7 +95,7 @@ class AutoShotTrackerLifecycleTest {
 
         val state = tracker.update(
             ballFrame(),
-            resultAt(132L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.52))),
+            resultAt(264L, motionCandidates = listOf(candidate(x = 16.0 / 31.0, y = 0.52))),
             zone,
         )
 
@@ -123,12 +124,13 @@ class AutoShotTrackerLifecycleTest {
         tracker.update(landscapeMatFrame(), resultAt(0L), viewZone, mapper)
         tracker.update(landscapeMatFrame(), resultAt(33L), viewZone, mapper)
         tracker.update(landscapeBallFrame(), resultAt(66L), viewZone, mapper)
-        val locked = tracker.update(landscapeBallFrame(), resultAt(99L), viewZone, mapper)
+        repeat(4) { index -> tracker.update(landscapeBallFrame(), resultAt(99L + index * 33L), viewZone, mapper) }
+        val locked = tracker.update(landscapeBallFrame(), resultAt(231L), viewZone, mapper)
 
         assertEquals(AutoShotTrackerStatus.BallLocked, locked.status, locked.acquisitionDebug.statusSummary())
         val ball = assertNotNull(locked.lockedBall)
-        assertEquals(1.0 - 11.0 / 31.0, ball.x, absoluteTolerance = 0.03)
-        assertEquals(23.0 / 47.0, ball.y, absoluteTolerance = 0.03)
+        assertEquals(1.0 - 23.0 / 63.0, ball.x, absoluteTolerance = 0.03)
+        assertEquals(47.0 / 95.0, ball.y, absoluteTolerance = 0.03)
     }
 
     @Test
@@ -194,10 +196,10 @@ class AutoShotTrackerLifecycleTest {
         assertEquals(240.0 / 479.0, ball.y, absoluteTolerance = 0.03)
     }
 
-    private fun landscapeMatFrame(): YuvFrame = emptyMatFrame(width = 48, height = 32)
+    private fun landscapeMatFrame(): YuvFrame = emptyMatFrame(width = 96, height = 64)
 
     private fun landscapeBallFrame(): YuvFrame =
-        landscapeMatFrame().withDisc(centerX = 23, centerY = 11, radius = 3, y = 170, u = 104, v = 136)
+        landscapeMatFrame().withDisc(centerX = 47, centerY = 23, radius = 3, y = 170, u = 104, v = 136)
 
     private fun tracker(
         lostBallFrames: Int = 50,
@@ -224,8 +226,9 @@ class AutoShotTrackerLifecycleTest {
         tracker.update(emptyMatFrame(), resultAt(0L), zone)
         tracker.update(emptyMatFrame(), resultAt(33L), zone)
         tracker.update(ballFrame(), resultAt(66L), zone)
-        val locked = tracker.update(ballFrame(), resultAt(99L), zone)
-        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status)
+        repeat(4) { index -> tracker.update(ballFrame(), resultAt(99L + index * 33L), zone) }
+        val locked = tracker.update(ballFrame(), resultAt(231L), zone)
+        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status, locked.acquisitionDebug.statusSummary())
     }
 
     private fun resultAt(
@@ -244,7 +247,7 @@ class AutoShotTrackerLifecycleTest {
         LumaMotionCandidate(x = x, y = y, pixelCount = 8, confidence = confidence)
 
     private fun ballFrame(): YuvFrame =
-        emptyMatFrame().withDisc(centerX = 16, centerY = 25, radius = 3, y = 170, u = 104, v = 136)
+        emptyMatFrame().withDisc(centerX = 16, centerY = 25, radius = 2, y = 170, u = 104, v = 136)
 
     private fun emptyMatFrame(width: Int = 32, height: Int = 32, globalYShift: Int = 0): YuvFrame {
         val y = ByteArray(width * height)
