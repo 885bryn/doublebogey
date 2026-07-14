@@ -186,6 +186,41 @@ class AutoShotTrackerLifecycleTest {
         assertEquals(240.0 / 479.0, ball.y, absoluteTolerance = 0.03)
     }
 
+    @Test
+    fun croppedLaunchZoneMapsTopRejectedIntoFullViewCoordinates() {
+        val mapper = FrameCoordinateMapper(90)
+        val viewZone = LaunchZone(left = 0.50, top = 0.25, width = 0.25, height = 0.50)
+        val sourceWidth = 480
+        val sourceHeight = 320
+        val cropLeft = 120
+        val cropTop = 80
+        val zoneFrame = emptyMatFrame(width = 240, height = 80)
+        val localRejected = assertNotNull(
+            ZoneBallDetector(detectorConfig)
+                .analyzeFrame(zoneFrame, LaunchZone(0.0, 0.0, 1.0, 1.0))
+                .debug.topRejected,
+        )
+
+        val state = tracker().updateFromLaunchZoneCrop(
+            zoneFrame = zoneFrame,
+            result = resultAt(0L),
+            launchZone = viewZone,
+            mapper = mapper,
+            cropLeftPx = cropLeft,
+            cropTopPx = cropTop,
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+        )
+
+        val mapped = assertNotNull(state.acquisitionDebug.topRejected).candidate
+        val frameX = (cropLeft + localRejected.candidate.x * (zoneFrame.width - 1)) /
+            (sourceWidth - 1).toDouble()
+        val frameY = (cropTop + localRejected.candidate.y * (zoneFrame.height - 1)) /
+            (sourceHeight - 1).toDouble()
+        val expected = mapper.frameToView(frameX, frameY)
+        assertEquals(expected.x, mapped.x, absoluteTolerance = 1e-12)
+        assertEquals(expected.y, mapped.y, absoluteTolerance = 1e-12)
+    }
     private fun landscapeMatFrame(): YuvFrame = emptyMatFrame(width = 96, height = 64)
 
     private fun landscapeBallFrame(): YuvFrame =

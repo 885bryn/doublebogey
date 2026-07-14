@@ -1,0 +1,25 @@
+# Real-field detector fixtures
+# Crop coordinates are x,y,width,height in source screenshot pixels.
+
+range-ball.png
+source=Screenshot_20260713-150803.png
+source_path=C:/Users/bryan/AppData/Local/Packages/Microsoft.YourPhone_8wekyb3d8bbwe/TempState/medias/Screenshot_20260713-150803.png
+source_dimensions=538x1192
+crop=356,508,48,48
+label=ball
+notes=Clean white range ball on dark green mat, outside the green launch-zone box. No cyan detection dot or green box line occurs inside this crop.
+
+range-mat-curve.png
+source=Screenshot_20260713-150803.png
+source_path=C:/Users/bryan/AppData/Local/Packages/Microsoft.YourPhone_8wekyb3d8bbwe/TempState/medias/Screenshot_20260713-150803.png
+source_dimensions=538x1192
+crop=370,580,48,48
+label=not_ball
+notes=Clean sloped/curved white mat marking. No cyan detection dot or green box line occurs inside this crop.
+
+grass-ball.png
+included=false
+source=Screenshot_20260713-142211.png
+source_dimensions=442x979
+label=ball
+notes=Omitted because the visible ball location is covered by the cyan detector overlay; the overlay is app-rendered and must not be treated as camera pixels.

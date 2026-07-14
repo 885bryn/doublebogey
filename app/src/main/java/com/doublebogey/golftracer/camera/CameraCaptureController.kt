@@ -903,28 +903,13 @@ class CameraCaptureController(
         if (state == null) return
         if (lastCropLogTimestampNs != 0L && timestampNs - lastCropLogTimestampNs < CROP_LOG_INTERVAL_NS) return
 
-        val locked = state.lockedBall
-        val sample = when {
-            locked != null -> CropLogRequest(
-                center = locked.toCropPoint(mapper, crop, sourceWidth, sourceHeight),
-                kind = ZoneCropSampleKind.LockedBall,
-                score = locked.confidence,
-            )
-            state.acquisitionDebug.best != null -> {
-                val best = state.acquisitionDebug.best
-                CropLogRequest(
-                    center = best?.candidate?.toCropPoint(mapper, crop, sourceWidth, sourceHeight),
-                    kind = ZoneCropSampleKind.Candidate,
-                    score = best?.rankScore,
-                )
-            }
-            else -> CropLogRequest(
-                center = 0.5 to 0.5,
-                kind = ZoneCropSampleKind.RandomNegative,
-                score = null,
-            )
-        }
-        val center = sample.center ?: return
+        val sample = ZoneCropSampleSelector.select(
+            lockedBall = state.lockedBall,
+            debug = state.acquisitionDebug,
+        )
+        val center = sample.candidate
+            ?.toCropPoint(mapper, crop, sourceWidth, sourceHeight)
+            ?: if (sample.kind == ZoneCropSampleKind.RandomNegative) 0.5 to 0.5 else return
         runCatching {
             cropLogger.logSample(
                 frame = zoneFrame,
@@ -933,6 +918,11 @@ class CameraCaptureController(
                 kind = sample.kind,
                 timestampNs = timestampNs,
                 score = sample.score,
+                rejection = sample.shape?.rejection,
+                closedEdgeCoverage = sample.shape?.metrics?.closedEdgeCoverage,
+                radialAlignment = sample.shape?.metrics?.radialAlignment,
+                radiusVariation = sample.shape?.metrics?.radiusVariation,
+                lineContinuation = sample.shape?.metrics?.lineContinuation,
             )
             lastCropLogTimestampNs = timestampNs
         }
@@ -953,11 +943,6 @@ class CameraCaptureController(
         return cropX to cropY
     }
 
-    private data class CropLogRequest(
-        val center: Pair<Double, Double>?,
-        val kind: ZoneCropSampleKind,
-        val score: Double?,
-    )
     private fun LaunchZone.cropBounds(frameWidth: Int, frameHeight: Int): PixelCrop {
         val maxX = frameWidth - 1
         val maxY = frameHeight - 1

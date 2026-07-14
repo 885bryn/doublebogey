@@ -312,6 +312,9 @@ class AutoShotTracker(
             candidates = debug.candidates.map { candidateDebug ->
                 candidateDebug.copy(candidate = transform(candidateDebug.candidate))
             },
+            topRejected = debug.topRejected?.let { candidateDebug ->
+                candidateDebug.copy(candidate = transform(candidateDebug.candidate))
+            },
         ),
     )
 
