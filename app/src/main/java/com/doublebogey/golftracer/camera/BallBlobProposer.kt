@@ -41,7 +41,6 @@ class BallBlobProposer(
         val outerBlur = DoubleArray(pixelCount)
         val sampleResponses = DoubleArray(((frame.width + 3) / 4) * ((frame.height + 3) / 4))
         val maximaIndices = IntArray(pixelCount)
-        val maximaResponses = DoubleArray(pixelCount)
         val candidates = ArrayList<BallBlobProposal>()
 
         for (radiusPx in radiiPx) {
@@ -78,7 +77,6 @@ class BallBlobProposer(
                 border = border,
                 threshold = threshold,
                 maximaIndices = maximaIndices,
-                maximaResponses = maximaResponses,
             )
 
             var maximum = 0
@@ -89,7 +87,7 @@ class BallBlobProposer(
                         centerX = (index % frame.width).toDouble(),
                         centerY = (index / frame.width).toDouble(),
                         radiusPx = radiusPx,
-                        response = maximaResponses[maximum],
+                        response = innerHorizontal[index],
                     ),
                 )
                 maximum += 1
@@ -235,7 +233,6 @@ class BallBlobProposer(
         border: Int,
         threshold: Double,
         maximaIndices: IntArray,
-        maximaResponses: DoubleArray,
     ): Int {
         if (border >= width - border || border >= height - border) return 0
 
@@ -248,7 +245,6 @@ class BallBlobProposer(
                 val response = responses[index]
                 if (response > threshold && isLocalMaximum(responses, width, index, response)) {
                     maximaIndices[maximaCount] = index
-                    maximaResponses[maximaCount] = response
                     maximaCount += 1
                 }
                 x += 1
