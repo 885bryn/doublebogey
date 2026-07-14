@@ -150,8 +150,11 @@ class MainActivity : Activity() {
             gravity = Gravity.START
         }
         val startingBadges = CameraStatusBadgeModel.starting()
-        val calibrationBadgeText = statusBadgeText(startingBadges.calibration)
+        val detectorBadgeText = statusBadgeText(startingBadges.detector)
         val ballBadgeText = statusBadgeText(startingBadges.ball)
+        val guidanceText = overlayText("Keep the ball and hitting spot inside the green box.").apply {
+            gravity = Gravity.CENTER
+        }
         val networkStatusText = overlayText("Starting network...").apply {
             gravity = Gravity.END
         }
@@ -192,7 +195,7 @@ class MainActivity : Activity() {
                         trackingState = state.trackingState,
                         acquisitionDebug = state.acquisitionDebug,
                     )
-                    calibrationBadgeText.applyBadge(badges.calibration)
+                    detectorBadgeText.applyBadge(badges.detector)
                     ballBadgeText.applyBadge(badges.ball)
                 }
             },
@@ -226,7 +229,7 @@ class MainActivity : Activity() {
                                 orientation = LinearLayout.HORIZONTAL
                                 gravity = Gravity.START
                                 addView(
-                                    calibrationBadgeText,
+                                    detectorBadgeText,
                                     LinearLayout.LayoutParams(
                                         0,
                                         LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -248,6 +251,15 @@ class MainActivity : Activity() {
                                 LinearLayout.LayoutParams.MATCH_PARENT,
                                 LinearLayout.LayoutParams.WRAP_CONTENT,
                             ),
+                        )
+                        addView(
+                            guidanceText,
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ).apply {
+                                topMargin = 4.dp
+                            },
                         )
                         addView(
                             cameraStatusText,
@@ -291,7 +303,7 @@ class MainActivity : Activity() {
                 )
                 addView(
                     Button(this@MainActivity).apply {
-                        text = "Calibrate mat"
+                        text = "Reset detection"
                         setOnClickListener {
                             overlayView.detectionCandidates = emptyList()
                             overlayView.trackPoints = emptyList()

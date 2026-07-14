@@ -7,9 +7,7 @@ import kotlin.test.assertTrue
 
 class AutoShotTrackerLifecycleTest {
     private val zone = LaunchZone(left = 0.0, top = 0.60, width = 1.0, height = 0.40)
-    private val detectorConfig = ZoneBallDetectorConfig(
-        lockThreshold = 8.0,
-    )
+    private val detectorConfig = ZoneBallDetectorConfig()
 
     @Test
     fun searchesLocksLaunchesReviewsThenAutomaticallyRearms() {
@@ -289,4 +287,3 @@ class AutoShotTrackerLifecycleTest {
         return copy(y = nextY, u = nextU, v = nextV)
     }
 }
-

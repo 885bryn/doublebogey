@@ -6,39 +6,18 @@ object DetectionDebugFilter {
         launchZone: LaunchZone,
         trackingState: ShotTrackerState?,
     ): List<LumaMotionCandidate> {
-        if (trackingState?.points?.isNotEmpty() == true) {
-            return emptyList()
-        }
-
+        if (trackingState?.points?.isNotEmpty() == true) return emptyList()
         val state = trackerState ?: return emptyList()
-        val locked = state.lockedBall
-        if (locked != null) {
-            return listOf(locked).filter { candidate -> launchZone.contains(candidate.x, candidate.y) }
-        }
-
-        return state.acquisitionDebug.candidates
-            .firstOrNull()
-            ?.candidate
-            ?.takeIf { candidate -> launchZone.contains(candidate.x, candidate.y) }
-            ?.let(::listOf)
-            .orEmpty()
+        val candidate = state.lockedBall ?: state.acquisitionDebug.best?.candidate
+        return candidate?.takeIf { launchZone.contains(it.x, it.y) }?.let(::listOf).orEmpty()
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun visibleCandidates(
         result: LumaMotionResult,
         launchZone: LaunchZone,
         trackingState: ShotTrackerState?,
-    ): List<LumaMotionCandidate> {
-        if (trackingState?.points?.isNotEmpty() == true) {
-            return emptyList()
-        }
-
-        return result.stillCandidates
-            .filter { candidate -> launchZone.contains(candidate.x, candidate.y) }
-            .maxByOrNull { candidate -> candidate.confidence }
-            ?.let(::listOf)
-            .orEmpty()
-    }
+    ): List<LumaMotionCandidate> = emptyList()
 
     private fun LaunchZone.contains(x: Double, y: Double): Boolean =
         x >= left && x <= left + width && y >= top && y <= top + height

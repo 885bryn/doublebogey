@@ -5,68 +5,26 @@ import kotlin.math.PI
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Temporary source-compatibility for AutoShotTracker and CameraStatusBadgeModel. */
-enum class ZoneBallCalibrationState { Uncalibrated, Calibrating, Calibrated }
-
 data class ZoneBallDetectorConfig(
-    val calibrationFramesRequired: Int = 1,
     val assumedZoneWidthMm: Double = 1500.0,
     val ballDiameterMm: Double = 42.7,
-    val minAnnulusContrast: Double = 2.5,
-    val maxInteriorUniformity: Double = 0.95,
-    val minEdgeCircularity: Double = 0.45,
-    val chromaShiftTolerance: Double = 45.0,
-    val runnerUpMargin: Double = 1.5,
-    val persistenceDecay: Double = 0.90,
-    val lockThreshold: Double = 12.0,
-    val maxMissedLockFrames: Int = 2,
-    val maxCandidatesPerFrame: Int = 8,
-    val sigmaFloor: Double = 6.0,
     val proposer: BallBlobProposerConfig = BallBlobProposerConfig(),
     val verifier: BallShapeVerifierConfig = BallShapeVerifierConfig(),
     val tracker: BallCandidateTrackerConfig = BallCandidateTrackerConfig(),
 ) {
     init {
-        require(calibrationFramesRequired > 0)
         require(assumedZoneWidthMm > 0.0)
         require(ballDiameterMm > 0.0)
-        require(minAnnulusContrast >= 0.0)
-        require(maxInteriorUniformity >= 0.0)
-        require(minEdgeCircularity in 0.0..1.0)
-        require(chromaShiftTolerance >= 0.0)
-        require(runnerUpMargin >= 1.0)
-        require(persistenceDecay in 0.0..1.0)
-        require(lockThreshold > 0.0)
-        require(maxMissedLockFrames > 0)
-        require(maxCandidatesPerFrame > 0)
-        require(sigmaFloor > 0.0)
     }
 }
-
 data class ZoneBallCandidateDebug(
     val candidate: LumaMotionCandidate,
-    val radiusPx: Double = 0.0,
-    val proposalResponse: Double = 0.0,
-    val rankScore: Double = 0.0,
-    val metrics: BallShapeMetrics = EMPTY_SHAPE_METRICS,
-    val rejection: BallShapeRejection? = null,
-    // Temporary source-compatibility fields for Tasks 6-7 callers.
-    val area: Int = candidate.pixelCount,
-    val fillRatio: Double = metrics.closedEdgeCoverage,
-    val aspectRatio: Double = 1.0,
-    val meanSignificance: Double = metrics.annulusContrast,
-    val chromaShift: Double = metrics.chromaShift,
-    val meanYDelta: Double = 0.0,
-    val annulusContrast: Double = metrics.annulusContrast,
-    val interiorUniformity: Double = metrics.interiorUniformity,
-    val edgeCircularity: Double = metrics.closedEdgeCoverage,
-    val persistenceScore: Double = 0.0,
-) {
-    companion object {
-        private val EMPTY_SHAPE_METRICS = BallShapeMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    }
-}
-
+    val radiusPx: Double,
+    val proposalResponse: Double,
+    val rankScore: Double,
+    val metrics: BallShapeMetrics,
+    val rejection: BallShapeRejection?,
+)
 data class ZoneBallDebug(
     val candidates: List<ZoneBallCandidateDebug> = emptyList(),
     val topRejected: ZoneBallCandidateDebug? = null,
@@ -77,19 +35,6 @@ data class ZoneBallDebug(
     val confirmationWindow: Int = 7,
     val margin: Double = 0.0,
     val ambiguous: Boolean = false,
-    // Temporary non-stale source compatibility for Tasks 6-7 callers.
-    val calibrationState: ZoneBallCalibrationState = ZoneBallCalibrationState.Uncalibrated,
-    val calibrationFramesCollected: Int = 0,
-    val calibrationFramesRequired: Int = 0,
-    val medianSigmaY: Double = 0.0,
-    val foregroundFraction: Double = 0.0,
-    val backgroundStale: Boolean = false,
-    val rejectedBySize: Int = 0,
-    val rejectedByShape: Int = 0,
-    val rejectedBySignificance: Int = 0,
-    val rejectedByChroma: Int = 0,
-    val lockThreshold: Double = 0.0,
-    val leadingPersistence: Double = 0.0,
 ) {
     val best: ZoneBallCandidateDebug? get() = candidates.firstOrNull()
 
@@ -106,41 +51,16 @@ data class ZoneBallDebug(
     private fun Double?.f1() = String.format(Locale.US, "%.1f", this ?: 0.0)
     private fun Double?.f2() = String.format(Locale.US, "%.2f", this ?: 0.0)
 }
-
 data class ZoneBallDetection(val acceptedCandidate: LumaMotionCandidate?, val debug: ZoneBallDebug)
 
 class ZoneBallDetector(private val config: ZoneBallDetectorConfig = ZoneBallDetectorConfig()) {
-    var calibrationState: ZoneBallCalibrationState = ZoneBallCalibrationState.Uncalibrated
-        private set
-
-    private var warmupFrameCount = 0
     private var activeContext: DetectionContext? = null
     private val scaleEstimator = BallScaleEstimator(config.assumedZoneWidthMm, config.ballDiameterMm)
     private val proposer = BallBlobProposer(
-        config.proposer.copy(maxProposals = min(8, min(config.proposer.maxProposals, config.maxCandidatesPerFrame))),
+        config.proposer.copy(maxProposals = min(8, config.proposer.maxProposals)),
     )
     private val verifier = BallShapeVerifier(config.verifier)
     private val tracker = BallCandidateTracker(config.tracker)
-
-    @Suppress("UNUSED_PARAMETER")
-    fun startCalibration(launchZone: LaunchZone) {
-        calibrationState = ZoneBallCalibrationState.Calibrating
-        warmupFrameCount = 0
-        activeContext = null
-        tracker.reset()
-    }
-
-    @Suppress("UNUSED_PARAMETER")
-    fun collectCalibrationFrame(
-        frame: YuvFrame,
-        launchZone: LaunchZone,
-        mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
-    ): ZoneBallDetection {
-        if (calibrationState != ZoneBallCalibrationState.Calibrating) startCalibration(launchZone)
-        warmupFrameCount += 1
-        if (warmupFrameCount >= config.calibrationFramesRequired) calibrationState = ZoneBallCalibrationState.Calibrated
-        return ZoneBallDetection(null, compatibilityDebug())
-    }
 
     fun analyzeFrame(
         frame: YuvFrame,
@@ -148,8 +68,6 @@ class ZoneBallDetector(private val config: ZoneBallDetectorConfig = ZoneBallDete
         mapper: FrameCoordinateMapper = FrameCoordinateMapper.Identity,
     ): ZoneBallDetection {
         require(launchZone.isValid()) { "launchZone must be valid" }
-        if (calibrationState == ZoneBallCalibrationState.Uncalibrated) calibrationState = ZoneBallCalibrationState.Calibrated
-
         val frameZone = mapper.viewZoneToFrameZone(launchZone)
         val bounds = frameZone.bounds(frame)
         val context = DetectionContext(frame.width, frame.height, bounds, frameZone, mapper)
@@ -196,26 +114,14 @@ class ZoneBallDetector(private val config: ZoneBallDetectorConfig = ZoneBallDete
                 confirmationWindow = config.tracker.windowSize,
                 margin = tracking.margin,
                 ambiguous = tracking.ambiguous,
-                calibrationState = calibrationState,
-                calibrationFramesCollected = warmupFrameCount,
-                calibrationFramesRequired = config.calibrationFramesRequired,
             ),
         )
     }
 
     fun reset() {
-        calibrationState = ZoneBallCalibrationState.Uncalibrated
-        warmupFrameCount = 0
         activeContext = null
         tracker.reset()
     }
-
-    private fun compatibilityDebug() = ZoneBallDebug(
-        calibrationState = calibrationState,
-        calibrationFramesCollected = warmupFrameCount,
-        calibrationFramesRequired = config.calibrationFramesRequired,
-        confirmationWindow = config.tracker.windowSize,
-    )
 
     private fun BallShapeEvaluation.toDebug(frame: YuvFrame, bounds: PixelBounds, mapper: FrameCoordinateMapper) =
         ZoneBallCandidateDebug(

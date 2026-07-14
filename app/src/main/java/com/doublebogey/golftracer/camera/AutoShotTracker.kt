@@ -3,8 +3,6 @@ package com.doublebogey.golftracer.camera
 import kotlin.math.hypot
 
 enum class AutoShotTrackerStatus {
-    @Deprecated("Temporary compile shim; tracker lifecycle is calibration-free")
-    Calibrating,
     Searching,
     BallLocked,
     Tracking,
@@ -330,4 +328,3 @@ class AutoShotTracker(
 
     private fun distance(ax: Double, ay: Double, bx: Double, by: Double): Double = hypot(ax - bx, ay - by)
 }
-

@@ -96,18 +96,6 @@ class ZoneBallDetectorTest {
         assertTrue(accepted.y in zone.top..zone.top + zone.height)
     }
 
-    @Test fun compatibilityCalibrationOnlyWarmsUp() {
-        val detector = ZoneBallDetector(ZoneBallDetectorConfig(calibrationFramesRequired = 2))
-        val frame = patternedMatFrame().withDisc(48, 32, 2, 224)
-        detector.startCalibration(fullZone)
-        detector.collectCalibrationFrame(frame, fullZone)
-        detector.collectCalibrationFrame(frame, fullZone)
-        val result = detector.analyzeRepeatedly(frame, times = 5)
-        assertEquals(ZoneBallCalibrationState.Calibrated, detector.calibrationState)
-        assertFalse(result.debug.backgroundStale)
-        assertNotNull(result.acceptedCandidate)
-    }
-
     @Test fun exactFractionalZoneBoundaryRejectsOutwardCropPixel() {
         val zone = LaunchZone(left = 20.5 / 95.0, top = 0.0, width = 50.0 / 95.0, height = 1.0)
         val frame = flatFrame().withDisc(20, 32, 2, 255).withDisc(30, 32, 2, 224)
