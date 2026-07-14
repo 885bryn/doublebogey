@@ -30,6 +30,7 @@ object CaptureModeSelector {
         return candidates
             .maxWith(
                 compareBy<CaptureModeCandidate> { it.maxFps }
+                    .thenBy { if (it.minFps == 30 && it.maxFps == 30) 1 else 0 }
                     .thenBy { -abs(it.area - TargetArea) },
             )
             .toCaptureMode()

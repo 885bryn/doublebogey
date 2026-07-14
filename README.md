@@ -22,4 +22,6 @@ Later milestones add NSD/WebSocket networking, high-speed camera capture, detect
 ## M2 Verification
 
 - Local verification: `rtk ./gradlew.bat :app:testDebugUnitTest :app:assembleDebug` passed.
-- Pending physical-device verification on Samsung SM-S916W and Nothing Phone 3a Pro / A059P.
+- Physical-device verification passed on Nothing Phone 3a Pro / A059P: debug APK installed, CAMERA preview ran, selected mode/FPS and Y-plane frame count displayed, launch-zone drag/persist/reset worked.
+- Physical-device verification passed on Samsung Galaxy S23+ / SM-S916W: debug APK installed, CAMERA preview ran, selected mode/FPS and Y-plane frame count displayed, launch-zone drag/persist/reset worked.
+- M1 networking remained intact during M2 verification: DISPLAY discovery/heartbeat worked with CAMERA preview active on the shared hotspot.

@@ -141,13 +141,19 @@ class MainActivity : Activity() {
         val screenGeneration = nextUiGeneration()
         preferences.edit().putString(KEY_LAST_ROLE, RoleChoice.Camera.persistedName).apply()
 
+        val initialLaunchZone = readLaunchZone()
         val textureView = TextureView(this)
         val overlayView = LaunchZoneOverlayView(this).apply {
-            launchZone = readLaunchZone()
-            onLaunchZoneChanged = ::persistLaunchZone
+            launchZone = initialLaunchZone
         }
         val cameraStatusText = overlayText("Starting camera...").apply {
             gravity = Gravity.START
+        }
+        val startingBadges = CameraStatusBadgeModel.starting()
+        val detectorBadgeText = statusBadgeText(startingBadges.detector)
+        val ballBadgeText = statusBadgeText(startingBadges.ball)
+        val guidanceText = overlayText("Keep the ball and hitting spot inside the green box.").apply {
+            gravity = Gravity.CENTER
         }
         val networkStatusText = overlayText("Starting network...").apply {
             gravity = Gravity.END
@@ -157,10 +163,44 @@ class MainActivity : Activity() {
                 networkStatusText.text = status
             }
         }
-        val cameraController = CameraCaptureController(this, textureView) { status ->
-            updateIfCurrent(screenGeneration) {
-                cameraStatusText.text = status
-            }
+        val cameraController = CameraCaptureController(
+            context = this,
+            textureView = textureView,
+            initialLaunchZone = initialLaunchZone,
+            onStatus = { status ->
+                updateIfCurrent(screenGeneration) {
+                    cameraStatusText.text = status
+                }
+            },
+            onDetectionResult = { result ->
+                updateIfCurrent(screenGeneration) {
+                    overlayView.detectionCandidates = result.candidates
+                }
+            },
+            onTrackingState = { state ->
+                updateIfCurrent(screenGeneration) {
+                    overlayView.trackPoints = if (state.points.isNotEmpty()) {
+                        state.points
+                    } else {
+                        emptyList()
+                    }
+                }
+            },
+            onAutoTrackingState = { state ->
+                updateIfCurrent(screenGeneration) {
+                    val badges = CameraStatusBadgeModel.from(
+                        shotStatus = state.status,
+                        trackingState = state.trackingState,
+                        acquisitionDebug = state.acquisitionDebug,
+                    )
+                    detectorBadgeText.applyBadge(badges.detector)
+                    ballBadgeText.applyBadge(badges.ball)
+                }
+            },
+        )
+        overlayView.onLaunchZoneChanged = { launchZone ->
+            persistLaunchZone(launchZone)
+            cameraController.updateLaunchZone(launchZone)
         }
 
         activeNetworkController = networkController
@@ -186,6 +226,43 @@ class MainActivity : Activity() {
                 addView(
                     LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.VERTICAL
+                        addView(
+                            LinearLayout(this@MainActivity).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.START
+                                addView(
+                                    detectorBadgeText,
+                                    LinearLayout.LayoutParams(
+                                        0,
+                                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                                        1f,
+                                    ),
+                                )
+                                addView(
+                                    ballBadgeText,
+                                    LinearLayout.LayoutParams(
+                                        0,
+                                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                                        1f,
+                                    ).apply {
+                                        leftMargin = 8.dp
+                                    },
+                                )
+                            },
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ),
+                        )
+                        addView(
+                            guidanceText,
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ).apply {
+                                topMargin = 4.dp
+                            },
+                        )
                         addView(
                             cameraStatusText,
                             LinearLayout.LayoutParams(
@@ -228,10 +305,28 @@ class MainActivity : Activity() {
                 )
                 addView(
                     Button(this@MainActivity).apply {
+                        text = "Reset detection"
+                        setOnClickListener {
+                            overlayView.detectionCandidates = emptyList()
+                            overlayView.trackPoints = emptyList()
+                            activeCameraController?.resetShotReview()
+                        }
+                    },
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+                    ).apply {
+                        setMargins(12.dp, 12.dp, 12.dp, 12.dp)
+                    },
+                )
+                addView(
+                    Button(this@MainActivity).apply {
                         text = "Reset box"
                         setOnClickListener {
                             overlayView.launchZone = LaunchZone.Default
                             persistLaunchZone(LaunchZone.Default)
+                            cameraController.updateLaunchZone(LaunchZone.Default)
                         }
                     },
                     FrameLayout.LayoutParams(
@@ -326,6 +421,28 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.argb(160, 0, 0, 0))
             setPadding(8.dp, 6.dp, 8.dp, 6.dp)
         }
+
+    private fun statusBadgeText(badge: CameraStatusBadge): TextView =
+        TextView(this).apply {
+            textSize = 18f
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(8.dp, 10.dp, 8.dp, 10.dp)
+            applyBadge(badge)
+        }
+
+    private fun TextView.applyBadge(badge: CameraStatusBadge) {
+        text = badge.text
+        setTextColor(Color.WHITE)
+        setBackgroundColor(
+            when (badge.tone) {
+                CameraStatusBadgeTone.Waiting -> Color.argb(220, 88, 88, 88)
+                CameraStatusBadgeTone.Ready -> Color.argb(230, 0, 132, 62)
+                CameraStatusBadgeTone.Detected -> Color.argb(230, 0, 116, 150)
+                CameraStatusBadgeTone.Warning -> Color.argb(235, 190, 72, 0)
+            },
+        )
+    }
 
     private fun updateIfCurrent(screenGeneration: Int, update: () -> Unit) {
         runOnUiThread {

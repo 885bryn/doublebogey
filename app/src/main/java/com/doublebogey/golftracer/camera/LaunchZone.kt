@@ -38,3 +38,14 @@ data class LaunchZone(
         }
     }
 }
+
+class LaunchZoneSnapshot(initial: LaunchZone) {
+    @Volatile
+    private var value = initial
+
+    fun current(): LaunchZone = value
+
+    fun update(next: LaunchZone) {
+        value = next
+    }
+}
