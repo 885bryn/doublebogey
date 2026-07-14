@@ -125,6 +125,35 @@ class AutoShotTrackerTest {
         assertEquals(AutoShotTrackerStatus.BallLocked, locked.status)
     }
 
+    @Test
+    fun resultOnlyZoneChangeRestartsStableConfirmation() {
+        val tracker = AutoShotTracker(
+            config = AutoShotTrackerConfig(stableFramesRequired = 2),
+        )
+        val movedZone = zone.copy(left = 0.41)
+
+        val firstZone = tracker.update(
+            resultAt(0L, stillCandidates = listOf(candidate(x = 0.50, y = 0.80))),
+            zone,
+        )
+        val firstMovedZone = tracker.update(
+            resultAt(33_000_000L, stillCandidates = listOf(candidate(x = 0.51, y = 0.80))),
+            movedZone,
+        )
+
+        assertEquals(AutoShotTrackerStatus.Searching, firstZone.status)
+        assertEquals(AutoShotTrackerStatus.Searching, firstMovedZone.status)
+        assertEquals(0.51, firstMovedZone.lockedBall?.x)
+
+        val locked = tracker.update(
+            resultAt(66_000_000L, stillCandidates = listOf(candidate(x = 0.51, y = 0.80))),
+            movedZone,
+        )
+
+        assertEquals(AutoShotTrackerStatus.BallLocked, locked.status)
+        assertEquals(0.51, locked.lockedBall?.x)
+    }
+
     private fun resultAt(
         timestampNs: Long,
         motionCandidates: List<LumaMotionCandidate> = emptyList(),

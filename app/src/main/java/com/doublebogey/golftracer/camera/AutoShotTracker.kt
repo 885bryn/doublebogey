@@ -168,6 +168,10 @@ class AutoShotTracker(
     }
 
     fun update(result: LumaMotionResult, launchZone: LaunchZone): AutoShotTrackerState {
+        if (activeLaunchZone != launchZone) {
+            resetAcquisition(launchZone)
+        }
+
         if (status == AutoShotTrackerStatus.Reviewing) return currentState()
 
         if (status == AutoShotTrackerStatus.Tracking) {
