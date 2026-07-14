@@ -172,7 +172,13 @@ class AutoShotTracker(
             resetAcquisition(launchZone)
         }
 
-        if (status == AutoShotTrackerStatus.Reviewing) return currentState()
+        if (status == AutoShotTrackerStatus.Reviewing) {
+            if (result.timestampNs - reviewStartedNs >= config.reviewHoldNs) {
+                resetAcquisition(launchZone)
+            } else {
+                return currentState()
+            }
+        }
 
         if (status == AutoShotTrackerStatus.Tracking) {
             val trackingState = delegate.update(result, launchZone)
