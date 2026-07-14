@@ -1,5 +1,6 @@
 package com.doublebogey.golftracer.camera
 
+import java.util.Arrays
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -74,7 +75,12 @@ class BallShapeVerifier(
             regionStats.interiorV.mean - regionStats.annulusV.mean,
         )
 
-        val edgeStats = measureEdges(frame, proposal, regionStats.annulusY.standardDeviation)
+        val edgeStats = measureEdges(
+            frame,
+            proposal,
+            regionStats.annulusY.standardDeviation,
+            regionStats.annulusSigma,
+        )
         val metrics = BallShapeMetrics(
             annulusContrast = annulusContrast,
             interiorUniformity = interiorUniformity,
@@ -113,6 +119,7 @@ class BallShapeVerifier(
         val annulusY = RunningStats()
         val annulusU = RunningStats()
         val annulusV = RunningStats()
+        val annulusLumaSamples = ArrayList<Double>()
         val outerRadius = 2.2 * proposal.radiusPx
         val left = floor(proposal.centerX - outerRadius).toInt().coerceAtLeast(0)
         val right = floor(proposal.centerX + outerRadius).toInt().coerceAtMost(frame.width - 1)
@@ -133,19 +140,67 @@ class BallShapeVerifier(
                         annulusY.add(unsigned(frame.y[index]))
                         annulusU.add(unsigned(frame.u[index]))
                         annulusV.add(unsigned(frame.v[index]))
+                        annulusLumaSamples.add(unsigned(frame.y[index]))
                     }
                 }
             }
         }
-        return RegionStats(interiorY, interiorU, interiorV, annulusY, annulusU, annulusV)
+        return RegionStats(
+            interiorY,
+            interiorU,
+            interiorV,
+            annulusY,
+            annulusU,
+            annulusV,
+            robustStandardDeviation(annulusLumaSamples),
+        )
+    }
+
+    private fun robustStandardDeviation(samples: List<Double>): Double {
+        if (samples.isEmpty()) return 0.0
+        val values = samples.toDoubleArray()
+        Arrays.sort(values)
+        val median = median(values)
+        for (index in values.indices) values[index] = abs(values[index] - median)
+        Arrays.sort(values)
+        return MAD_TO_SIGMA * median(values)
+    }
+
+    private fun median(sortedValues: DoubleArray): Double {
+        val middle = sortedValues.size / 2
+        return if (sortedValues.size % 2 == 0) {
+            (sortedValues[middle - 1] + sortedValues[middle]) / 2.0
+        } else {
+            sortedValues[middle]
+        }
     }
 
     private fun measureEdges(
         frame: YuvFrame,
         proposal: BallBlobProposal,
         annulusSigma: Double,
+        robustAnnulusSigma: Double,
     ): EdgeStats {
-        val supportThreshold = max(8.0, 1.5 * annulusSigma)
+        val standardStats = measureEdgesAtThreshold(frame, proposal, max(8.0, 1.5 * annulusSigma))
+        if (robustAnnulusSigma >= annulusSigma) return standardStats
+
+        val robustStats = measureEdgesAtThreshold(
+            frame,
+            proposal,
+            max(8.0, 1.5 * robustAnnulusSigma),
+        )
+        return if (robustStats.lineContinuation > config.maxLineContinuation) {
+            robustStats
+        } else {
+            standardStats
+        }
+    }
+
+    private fun measureEdgesAtThreshold(
+        frame: YuvFrame,
+        proposal: BallBlobProposal,
+        supportThreshold: Double,
+    ): EdgeStats {
         val supportedRadii = DoubleArray(config.angularSectors)
         var supported = 0
         var alignmentSum = 0.0
@@ -264,6 +319,7 @@ class BallShapeVerifier(
         val annulusY: RunningStats,
         val annulusU: RunningStats,
         val annulusV: RunningStats,
+        val annulusSigma: Double,
     )
 
     private class RunningStats {
@@ -285,6 +341,7 @@ class BallShapeVerifier(
     }
 
     private companion object {
+        const val MAD_TO_SIGMA = 1.4826
         const val MIN_SUPPORT_ALIGNMENT = 0.55
         const val CONTINUATION_MAGNITUDE_RATIO = 0.70
         val RIM_RADIUS_FACTORS = doubleArrayOf(0.65, 0.85, 1.05, 1.25, 1.45)

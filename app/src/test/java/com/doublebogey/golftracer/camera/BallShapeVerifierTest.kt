@@ -3,7 +3,6 @@ package com.doublebogey.golftracer.camera
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
 import kotlin.test.Test
@@ -46,10 +45,12 @@ class BallShapeVerifierTest {
     })
 
     @Test
-    fun rejectsCurvedStripe() = assertRejected(BallShapeRejection.InteriorTooTextured, frame { x, y ->
-        val theta = atan2(y - CENTER, x - CENTER)
-        val radius = RADIUS * (1.0 + 0.42 * cos(theta))
-        if (abs(distance(x, y) - radius) <= 1.3) Pixel(224) else BACKGROUND
+    fun rejectsFiniteOpenCurvedStripe() = assertRejected(BallShapeRejection.InteriorTooTextured, frame { x, y ->
+        val arcCenterY = CENTER + 6.0
+        val angle = degrees(atan2(y - arcCenterY, x - CENTER))
+        val onFiniteArc = angularDistance(angle, -90.0) <= 75.0
+        val distanceFromArcCenter = hypot(x - CENTER, y - arcCenterY)
+        if (onFiniteArc && abs(distanceFromArcCenter - 6.0) <= 1.25) Pixel(224) else BACKGROUND
     })
 
     @Test
@@ -59,11 +60,21 @@ class BallShapeVerifierTest {
 
     @Test
     fun rejectsEndpoint() = assertRejected(BallShapeRejection.InsufficientClosedEdge, frame { x, y ->
-        val angle = degrees(atan2(y - CENTER, x - CENTER))
-        val inCap = distance(x, y) <= RADIUS
-        val continuedEdge = angularDistance(angle, 180.0) <= 80.0 &&
-            distance(x, y) in 7.5..9.5
-        if (inCap || continuedEdge) Pixel(224) else BACKGROUND
+        val distanceToFiniteSegment = when {
+            x < 12.0 -> hypot(x - 12.0, y - CENTER)
+            x > CENTER -> hypot(x - CENTER, y - CENTER)
+            else -> abs(y - CENTER)
+        }
+        if (distanceToFiniteSegment <= 2.5) Pixel(224) else BACKGROUND
+    })
+
+    @Test
+    fun rejectsConnectedContinuingContourAsLineContinuation() = assertRejected(BallShapeRejection.LineContinuation, frame { x, y ->
+        val radius = distance(x, y)
+        val inDisc = radius <= RADIUS
+        val inOuterContour = radius in 8.5..10.0
+        val connectingBridge = x in (CENTER + RADIUS)..(CENTER + 8.5) && abs(y - CENTER) <= 1.0
+        if (inDisc || inOuterContour || connectingBridge) Pixel(224) else BACKGROUND
     })
 
     @Test
