@@ -14,6 +14,17 @@ data class BallBlobProposal(
     val radiusPx: Double,
     val response: Double,
 )
+data class BallBlobProposalRegion(
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int,
+) {
+    init {
+        require(left <= right)
+        require(top <= bottom)
+    }
+}
 
 data class BallBlobProposerConfig(
     val maxProposals: Int = 8,
@@ -30,7 +41,11 @@ data class BallBlobProposerConfig(
 class BallBlobProposer(
     private val config: BallBlobProposerConfig = BallBlobProposerConfig(),
 ) {
-    fun propose(frame: YuvFrame, radiiPx: List<Double>): List<BallBlobProposal> {
+    fun propose(
+        frame: YuvFrame,
+        radiiPx: List<Double>,
+        allowedCenterRegion: BallBlobProposalRegion? = null,
+    ): List<BallBlobProposal> {
         val proposalLimit = min(config.maxProposals, MAX_DOWNSTREAM_PROPOSALS)
         if (proposalLimit == 0 || radiiPx.isEmpty()) return emptyList()
 
@@ -76,6 +91,7 @@ class BallBlobProposer(
                 height = frame.height,
                 border = border,
                 threshold = threshold,
+                allowedCenterRegion = allowedCenterRegion,
                 maximaIndices = maximaIndices,
             )
 
@@ -232,15 +248,20 @@ class BallBlobProposer(
         height: Int,
         border: Int,
         threshold: Double,
+        allowedCenterRegion: BallBlobProposalRegion?,
         maximaIndices: IntArray,
     ): Int {
-        if (border >= width - border || border >= height - border) return 0
+        val startX = max(border, allowedCenterRegion?.left ?: border)
+        val endX = min(width - border, (allowedCenterRegion?.right?.plus(1)) ?: (width - border))
+        val startY = max(border, allowedCenterRegion?.top ?: border)
+        val endY = min(height - border, (allowedCenterRegion?.bottom?.plus(1)) ?: (height - border))
+        if (startX >= endX || startY >= endY) return 0
 
         var maximaCount = 0
-        var y = border
-        while (y < height - border) {
-            var x = border
-            while (x < width - border) {
+        var y = startY
+        while (y < endY) {
+            var x = startX
+            while (x < endX) {
                 val index = y * width + x
                 val response = responses[index]
                 if (response > threshold && isLocalMaximum(responses, width, index, response)) {

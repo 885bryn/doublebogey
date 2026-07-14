@@ -31,6 +31,25 @@ class BallBlobProposerTest {
     }
 
     @Test
+    fun allowedCenterRegionPreventsPaddingBlobsFromConsumingProposalSlots() {
+        val paddingCenters = listOf(
+            16 to 16, 32 to 16, 64 to 16, 80 to 16,
+            16 to 32, 80 to 32, 16 to 48, 32 to 48, 64 to 48, 80 to 48,
+        )
+        val frame = texturedFrame(
+            paddingCenters.map { (x, y) -> Disc(x, y, 4, 255) } + Disc(48, 32, 4, 180),
+        )
+        val allowed = BallBlobProposalRegion(left = 40, top = 24, right = 56, bottom = 40)
+
+        val proposals = proposer.propose(frame, radiiPx, allowed)
+
+        val best = assertNotNull(proposals.firstOrNull())
+        assertEquals(48.0, best.centerX, 2.0)
+        assertEquals(32.0, best.centerY, 2.0)
+        assertTrue(proposals.all { it.centerX in 40.0..56.0 && it.centerY in 24.0..40.0 })
+        assertTrue(proposals.size <= 8)
+    }
+    @Test
     fun returnsNoProposalsForFlatFrame() {
         val frame = yuvFrame(ByteArray(WIDTH * HEIGHT) { 112.toByte() })
 

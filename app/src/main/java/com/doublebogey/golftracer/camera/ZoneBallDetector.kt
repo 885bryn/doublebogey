@@ -152,7 +152,7 @@ class ZoneBallDetector(private val config: ZoneBallDetectorConfig = ZoneBallDete
 
         val frameZone = mapper.viewZoneToFrameZone(launchZone)
         val bounds = frameZone.bounds(frame)
-        val context = DetectionContext(frame.width, frame.height, bounds, mapper)
+        val context = DetectionContext(frame.width, frame.height, bounds, frameZone, mapper)
         if (activeContext != context) {
             activeContext = context
             tracker.reset()
@@ -161,11 +161,17 @@ class ZoneBallDetector(private val config: ZoneBallDetectorConfig = ZoneBallDete
         val padding = kotlin.math.ceil(scale.radiiPx.max() * 2.2).toInt()
         val analysisBounds = bounds.expand(frame, padding)
         val zoneFrame = frame.crop(analysisBounds)
-        val proposals = proposer.propose(zoneFrame, scale.radiiPx).filter { proposal ->
-            val sourceX = analysisBounds.left + proposal.centerX
-            val sourceY = analysisBounds.top + proposal.centerY
-            sourceX in bounds.left.toDouble()..bounds.right.toDouble() &&
-                sourceY in bounds.top.toDouble()..bounds.bottom.toDouble()
+        val centerBounds = frameZone.centerBounds(frame)
+        val allowedCenterRegion = centerBounds?.relativeTo(analysisBounds)
+        val proposals = if (allowedCenterRegion == null) {
+            emptyList()
+        } else {
+            proposer.propose(zoneFrame, scale.radiiPx, allowedCenterRegion).filter { proposal ->
+                frameZone.contains(
+                    x = (analysisBounds.left + proposal.centerX) / (frame.width - 1).coerceAtLeast(1),
+                    y = (analysisBounds.top + proposal.centerY) / (frame.height - 1).coerceAtLeast(1),
+                )
+            }
         }
         val evaluations = proposals.map { verifier.verify(zoneFrame, it) }
         val accepted = evaluations.filter { it.accepted }
@@ -247,6 +253,30 @@ class ZoneBallDetector(private val config: ZoneBallDetectorConfig = ZoneBallDete
         return PixelBounds(leftPx, rightPx, topPx, bottomPx)
     }
 
+    private fun LaunchZone.centerBounds(frame: YuvFrame): PixelBounds? {
+        val maxX = frame.width - 1
+        val maxY = frame.height - 1
+        val leftPx = kotlin.math.ceil(left * maxX).toInt().coerceIn(0, maxX)
+        val rightPx = kotlin.math.floor((left + width) * maxX).toInt().coerceIn(0, maxX)
+        val topPx = kotlin.math.ceil(top * maxY).toInt().coerceIn(0, maxY)
+        val bottomPx = kotlin.math.floor((top + height) * maxY).toInt().coerceIn(0, maxY)
+        return if (leftPx <= rightPx && topPx <= bottomPx) {
+            PixelBounds(leftPx, rightPx, topPx, bottomPx)
+        } else {
+            null
+        }
+    }
+
+    private fun LaunchZone.contains(x: Double, y: Double): Boolean =
+        x >= left && x <= left + width && y >= top && y <= top + height
+
+    private fun PixelBounds.relativeTo(container: PixelBounds) = BallBlobProposalRegion(
+        left = left - container.left,
+        top = top - container.top,
+        right = right - container.left,
+        bottom = bottom - container.top,
+    )
+
     private fun PixelBounds.expand(frame: YuvFrame, padding: Int) = PixelBounds(
         left = (left - padding).coerceAtLeast(0),
         right = (right + padding).coerceAtMost(frame.width - 1),
@@ -278,6 +308,7 @@ class ZoneBallDetector(private val config: ZoneBallDetectorConfig = ZoneBallDete
         val frameWidth: Int,
         val frameHeight: Int,
         val bounds: PixelBounds,
+        val frameZone: LaunchZone,
         val mapper: FrameCoordinateMapper,
     )
 }

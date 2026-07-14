@@ -108,6 +108,47 @@ class ZoneBallDetectorTest {
         assertNotNull(result.acceptedCandidate)
     }
 
+    @Test fun exactFractionalZoneBoundaryRejectsOutwardCropPixel() {
+        val zone = LaunchZone(left = 20.5 / 95.0, top = 0.0, width = 50.0 / 95.0, height = 1.0)
+        val frame = flatFrame().withDisc(20, 32, 2, 255).withDisc(30, 32, 2, 224)
+
+        val result = ZoneBallDetector().analyzeFrame(frame, zone)
+        val centers = result.debug.candidates.map { it.candidate.x * 95.0 }
+
+        assertTrue(centers.none { it < 20.5 }, "centers=$centers debug=${result.debug}")
+        assertTrue(centers.any { kotlin.math.abs(it - 30.0) <= 2.0 }, "centers=$centers debug=${result.debug}")
+    }
+
+    @Test fun paddingBlobsCannotStarveInZoneBallProposal() {
+        var frame = flatFrame(width = 128, height = 96).withDisc(64, 48, 2, 200)
+        val paddingCenters = listOf(
+            30 to 32, 30 to 42, 30 to 52, 30 to 62,
+            97 to 32, 97 to 42, 97 to 52, 97 to 62,
+            42 to 22, 54 to 22, 66 to 22, 78 to 22, 90 to 22,
+        )
+        paddingCenters.forEach { (x, y) -> frame = frame.withDisc(x, y, 2, 255) }
+        val zone = LaunchZone(left = 32.0 / 127.0, top = 24.0 / 95.0, width = 63.0 / 127.0, height = 47.0 / 95.0)
+
+        val result = ZoneBallDetector().analyzeRepeatedly(frame, zone, times = 5)
+
+        val accepted = assertNotNull(result.acceptedCandidate, result.debug.toString())
+        assertEquals(64.0 / 127.0, accepted.x, 0.025)
+        assertEquals(48.0 / 95.0, accepted.y, 0.025)
+        assertTrue(result.debug.proposalCount <= 8)
+    }
+
+    @Test fun subpixelZoneMoveWithSameCropBoundsResetsConfirmation() {
+        val detector = ZoneBallDetector()
+        val frame = patternedMatFrame().withDisc(48, 32, 2, 224)
+        val firstZone = LaunchZone(left = 0.2001, top = 0.0, width = 0.60, height = 1.0)
+        val movedZone = firstZone.copy(left = 0.2002)
+        repeat(4) { detector.analyzeFrame(frame, firstZone) }
+
+        val result = detector.analyzeFrame(frame, movedZone)
+
+        assertNull(result.acceptedCandidate)
+        assertEquals(1, result.debug.confirmationHits)
+    }
     @Test fun statusSummaryReportsPipelineMetricsWithoutCompatibilityClaims() {
         val result = ZoneBallDetector().analyzeFrame(patternedMatFrame().withDisc(48, 32, 2, 224), fullZone)
         val summary = result.debug.statusSummary(aeAwbLocked = true)
