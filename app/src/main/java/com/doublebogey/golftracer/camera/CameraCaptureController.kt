@@ -109,7 +109,7 @@ class CameraCaptureController(
     fun resetShotReview() {
         val state = tracker.resetForNextShot()
         onTrackingState(state.trackingState)
-        emitStatusFromCallingThread("Shot review cleared; calibrating empty launch zone")
+        emitStatusFromCallingThread("Detection reset; searching for ball")
     }
 
     fun stop() {
