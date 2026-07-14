@@ -26,7 +26,7 @@ class CameraCaptureController(
     private val context: Context,
     private val textureView: TextureView,
     private val onStatus: (String) -> Unit,
-    private val launchZoneProvider: () -> LaunchZone = { LaunchZone.Default },
+    initialLaunchZone: LaunchZone = LaunchZone.Default,
     private val onDetectionResult: (LumaMotionResult) -> Unit = {},
     private val onTrackingState: (ShotTrackerState) -> Unit = {},
     private val onAutoTrackingState: (AutoShotTrackerState) -> Unit = {},
@@ -44,12 +44,20 @@ class CameraCaptureController(
         enqueue = cameraCallbackHandler::post,
     )
     private val analysisGate = CameraFrameAnalysisGate()
+    private val launchZoneSnapshot = LaunchZoneSnapshot(initialLaunchZone)
     private val requestPolicy = CameraRequestPolicy.default()
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
     private var analysisThread: HandlerThread? = null
+
+    @Volatile
     private var analysisHandler: Handler? = null
+    private val analysisCommandDispatcher = GenerationBoundAnalysisCommandDispatcher<FrameGeneration>(
+        isCurrent = ::isCurrent,
+        enqueue = { command -> analysisHandler?.post(command) ?: false },
+        analysisGate = analysisGate,
+    )
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
@@ -119,10 +127,20 @@ class CameraCaptureController(
         }
     }
 
+    fun updateLaunchZone(launchZone: LaunchZone) {
+        launchZoneSnapshot.update(launchZone)
+    }
+
     fun resetShotReview() {
-        val state = tracker.resetForNextShot()
-        onTrackingState(state.trackingState)
-        emitStatusFromCallingThread("Detection reset; searching for ball")
+        val expectedGeneration = FrameGeneration(generation, readerGeneration)
+        analysisCommandDispatcher.dispatch(expectedGeneration) {
+            val state = tracker.resetForNextShot()
+            dispatchAnalysisCallback(expectedGeneration) {
+                onTrackingState(state.trackingState)
+                onAutoTrackingState(state)
+                onStatus("Detection reset; searching for ball")
+            }
+        }
     }
 
     fun stop() {
@@ -536,7 +554,7 @@ class CameraCaptureController(
         } else {
             null
         }
-        val launchZone = launchZoneProvider()
+        val launchZone = launchZoneSnapshot.current()
         var autoTrackingState: AutoShotTrackerState? = null
         val detectionResult = if (
             yPlane != null && uPlane != null && vPlane != null &&

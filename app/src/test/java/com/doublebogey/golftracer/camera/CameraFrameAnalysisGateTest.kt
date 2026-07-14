@@ -220,6 +220,92 @@ class CameraFrameAnalysisGateTest {
         assertTrue(published == null)
     }
 
+
+    @Test
+    fun resetReservationWaitsForQueuedFrameThenBlocksCompetingFrameUntilResetPublishes() {
+        val generation = FrameGeneration(camera = 3, reader = 8)
+        val gate = CameraFrameAnalysisGate()
+        val queued = mutableListOf<() -> Unit>()
+        val events = mutableListOf<String>()
+        val scheduled = AtomicBoolean(false)
+        val dispatcher = GenerationBoundAnalysisCommandDispatcher<FrameGeneration>(
+            isCurrent = { expected -> expected == generation },
+            enqueue = { command -> queued.add(command) },
+            analysisGate = gate,
+        )
+        assertTrue(gate.tryStartAnalysis())
+
+        val resetThread = Thread {
+            scheduled.set(
+                dispatcher.dispatch(generation) {
+                    events += "reset mutation"
+                    events += "tracking publication"
+                    events += "auto publication"
+                    events += "status publication"
+                },
+            )
+        }
+        resetThread.start()
+        assertTrue(resetThread.awaitState(Thread.State.WAITING))
+
+        events += "frame mutation"
+        assertFalse(gate.tryStartAnalysis())
+        gate.finishAnalysis()
+        resetThread.join()
+
+        assertTrue(scheduled.get())
+        assertFalse(gate.tryStartAnalysis(), "a competing frame must not jump ahead of the reserved reset")
+        queued.single().invoke()
+
+        assertTrue(
+            events == listOf(
+                "frame mutation",
+                "reset mutation",
+                "tracking publication",
+                "auto publication",
+                "status publication",
+            ),
+            events.toString(),
+        )
+        assertTrue(gate.tryStartAnalysis(), "current reset resumes frame admission after publication")
+        gate.finishAnalysis()
+    }
+
+    @Test
+    fun analysisCommandQueuedForStoppedGenerationIsDroppedAndLeavesGatePaused() {
+        var current = FrameGeneration(camera = 3, reader = 8)
+        val gate = CameraFrameAnalysisGate()
+        val queued = mutableListOf<() -> Unit>()
+        val events = mutableListOf<String>()
+        val dispatcher = GenerationBoundAnalysisCommandDispatcher<FrameGeneration>(
+            isCurrent = { expected -> expected == current },
+            enqueue = { command -> queued.add(command) },
+            analysisGate = gate,
+        )
+
+        assertTrue(dispatcher.dispatch(current) { events += "reset and publish" })
+        current = FrameGeneration(camera = 4, reader = 9)
+        queued.single().invoke()
+
+        assertTrue(events.isEmpty())
+        assertFalse(gate.tryStartAnalysis(), "stale command must not resume a stopped generation")
+    }
+
+    @Test
+    fun pausedAnalysisGateRejectsResetReservationBeforeItCanQueue() {
+        val generation = FrameGeneration(camera = 3, reader = 8)
+        val gate = CameraFrameAnalysisGate()
+        val queued = mutableListOf<() -> Unit>()
+        val dispatcher = GenerationBoundAnalysisCommandDispatcher<FrameGeneration>(
+            isCurrent = { true },
+            enqueue = { command -> queued.add(command) },
+            analysisGate = gate,
+        )
+        gate.pauseAndAwaitIdle()
+
+        assertFalse(dispatcher.dispatch(generation) { error("must not mutate") })
+        assertTrue(queued.isEmpty())
+    }
     private fun Thread.awaitState(expected: Thread.State): Boolean {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
         while (System.nanoTime() < deadline) {

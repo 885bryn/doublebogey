@@ -141,10 +141,10 @@ class MainActivity : Activity() {
         val screenGeneration = nextUiGeneration()
         preferences.edit().putString(KEY_LAST_ROLE, RoleChoice.Camera.persistedName).apply()
 
+        val initialLaunchZone = readLaunchZone()
         val textureView = TextureView(this)
         val overlayView = LaunchZoneOverlayView(this).apply {
-            launchZone = readLaunchZone()
-            onLaunchZoneChanged = ::persistLaunchZone
+            launchZone = initialLaunchZone
         }
         val cameraStatusText = overlayText("Starting camera...").apply {
             gravity = Gravity.START
@@ -166,13 +166,11 @@ class MainActivity : Activity() {
         val cameraController = CameraCaptureController(
             context = this,
             textureView = textureView,
+            initialLaunchZone = initialLaunchZone,
             onStatus = { status ->
                 updateIfCurrent(screenGeneration) {
                     cameraStatusText.text = status
                 }
-            },
-            launchZoneProvider = {
-                overlayView.launchZone
             },
             onDetectionResult = { result ->
                 updateIfCurrent(screenGeneration) {
@@ -200,6 +198,10 @@ class MainActivity : Activity() {
                 }
             },
         )
+        overlayView.onLaunchZoneChanged = { launchZone ->
+            persistLaunchZone(launchZone)
+            cameraController.updateLaunchZone(launchZone)
+        }
 
         activeNetworkController = networkController
         activeCameraController = cameraController
@@ -324,6 +326,7 @@ class MainActivity : Activity() {
                         setOnClickListener {
                             overlayView.launchZone = LaunchZone.Default
                             persistLaunchZone(LaunchZone.Default)
+                            cameraController.updateLaunchZone(LaunchZone.Default)
                         }
                     },
                     FrameLayout.LayoutParams(

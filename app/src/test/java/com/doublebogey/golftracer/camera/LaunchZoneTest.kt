@@ -55,6 +55,19 @@ class LaunchZoneTest {
         assertZoneEquals(LaunchZone(left = 0.45, top = 0.58, width = 0.30, height = 0.18), dragged)
     }
 
+    @Test
+    fun snapshotReturnsInitialZoneThenUpdatedZoneToTheNextReader() {
+        val initial = LaunchZone(left = 0.10, top = 0.20, width = 0.30, height = 0.40)
+        val moved = initial.copy(left = 0.25)
+        val snapshot = LaunchZoneSnapshot(initial)
+
+        assertEquals(initial, snapshot.current())
+
+        snapshot.update(moved)
+
+        assertEquals(moved, snapshot.current())
+    }
+
     private fun assertZoneEquals(expected: LaunchZone, actual: LaunchZone) {
         assertEquals(expected.left, actual.left, absoluteTolerance = 0.000000001)
         assertEquals(expected.top, actual.top, absoluteTolerance = 0.000000001)

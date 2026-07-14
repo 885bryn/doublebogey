@@ -22,8 +22,16 @@ class CameraFrameAnalysisGate {
     }
 
     fun pauseAndAwaitIdle() {
+        awaitIdleAfterPausing(reserveAnalysis = false, rejectIfPaused = false)
+    }
+
+    fun pauseAndReserveAnalysis(): Boolean =
+        awaitIdleAfterPausing(reserveAnalysis = true, rejectIfPaused = true)
+
+    private fun awaitIdleAfterPausing(reserveAnalysis: Boolean, rejectIfPaused: Boolean): Boolean {
         var interrupted = false
         synchronized(monitor) {
+            if (rejectIfPaused && paused) return false
             paused = true
             while (analysisInProgress) {
                 try {
@@ -32,10 +40,14 @@ class CameraFrameAnalysisGate {
                     interrupted = true
                 }
             }
+            if (reserveAnalysis) {
+                analysisInProgress = true
+            }
         }
         if (interrupted) {
             Thread.currentThread().interrupt()
         }
+        return true
     }
 
     fun resume() {
@@ -76,4 +88,33 @@ class LifecycleResourceCoordinator {
                 false
             }
         }
+}
+
+class GenerationBoundAnalysisCommandDispatcher<T>(
+    private val isCurrent: (T) -> Boolean,
+    private val enqueue: (() -> Unit) -> Boolean,
+    private val analysisGate: CameraFrameAnalysisGate,
+) {
+    fun dispatch(expectedGeneration: T, command: () -> Unit): Boolean {
+        if (!analysisGate.pauseAndReserveAnalysis()) return false
+
+        val enqueued = enqueue {
+            val shouldResume = isCurrent(expectedGeneration)
+            try {
+                if (shouldResume) command()
+            } finally {
+                analysisGate.finishAnalysis()
+                if (shouldResume && isCurrent(expectedGeneration)) {
+                    analysisGate.resume()
+                }
+            }
+        }
+        if (!enqueued) {
+            analysisGate.finishAnalysis()
+            if (isCurrent(expectedGeneration)) {
+                analysisGate.resume()
+            }
+        }
+        return enqueued
+    }
 }
