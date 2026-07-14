@@ -10,6 +10,25 @@ import kotlin.test.assertTrue
 
 class CameraFrameAnalysisGateTest {
     @Test
+    fun generationBoundDispatcherEnqueuesRunnableForAndroidHandlerCompatibility() {
+        var enqueuedRunnable: Runnable? = null
+        val dispatcher = GenerationBoundDispatcher<Unit>(
+            isCurrent = { true },
+            enqueue = { callback ->
+                enqueuedRunnable = callback
+                true
+            },
+        )
+
+        var delivered = false
+        dispatcher.dispatch(Unit) { delivered = true }
+
+        assertFalse(delivered)
+        checkNotNull(enqueuedRunnable).run()
+        assertTrue(delivered)
+    }
+
+    @Test
     fun dropsFramesWhileAnalysisIsInProgress() {
         val gate = CameraFrameAnalysisGate()
 
@@ -92,7 +111,7 @@ class CameraFrameAnalysisGateTest {
     @Test
     fun generationBoundDeliveryDropsQueuedCallbackAfterCameraGenerationChanges() {
         var current = FrameGeneration(camera = 4, reader = 9)
-        val queued = mutableListOf<() -> Unit>()
+        val queued = mutableListOf<Runnable>()
         val dispatcher = GenerationBoundDispatcher<FrameGeneration>(
             isCurrent = { expected -> current == expected },
             enqueue = { callback ->
@@ -104,7 +123,7 @@ class CameraFrameAnalysisGateTest {
 
         assertTrue(dispatcher.dispatch(current) { delivered = true })
         current = FrameGeneration(camera = 5, reader = 10)
-        queued.single().invoke()
+        queued.single().run()
 
         assertFalse(delivered)
     }
@@ -112,7 +131,7 @@ class CameraFrameAnalysisGateTest {
     @Test
     fun generationBoundDeliveryDropsQueuedCallbackAfterReaderChangesInSameCameraGeneration() {
         var current = FrameGeneration(camera = 7, reader = 2)
-        val queued = mutableListOf<() -> Unit>()
+        val queued = mutableListOf<Runnable>()
         val dispatcher = GenerationBoundDispatcher<FrameGeneration>(
             isCurrent = { expected -> current == expected },
             enqueue = { callback ->
@@ -124,7 +143,7 @@ class CameraFrameAnalysisGateTest {
 
         assertTrue(dispatcher.dispatch(current) { delivered = true })
         current = FrameGeneration(camera = 7, reader = 3)
-        queued.single().invoke()
+        queued.single().run()
 
         assertFalse(delivered)
     }
@@ -132,7 +151,7 @@ class CameraFrameAnalysisGateTest {
     @Test
     fun generationBoundDeliveryDeliversCurrentFrameGenerationCallback() {
         val current = FrameGeneration(camera = 7, reader = 3)
-        val queued = mutableListOf<() -> Unit>()
+        val queued = mutableListOf<Runnable>()
         val dispatcher = GenerationBoundDispatcher<FrameGeneration>(
             isCurrent = { expected -> expected == current },
             enqueue = { callback ->
@@ -143,7 +162,7 @@ class CameraFrameAnalysisGateTest {
         var delivered = false
 
         assertTrue(dispatcher.dispatch(current) { delivered = true })
-        queued.single().invoke()
+        queued.single().run()
 
         assertTrue(delivered)
     }

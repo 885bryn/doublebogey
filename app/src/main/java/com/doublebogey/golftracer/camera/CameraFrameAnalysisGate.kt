@@ -64,14 +64,14 @@ data class FrameGeneration(
 
 class GenerationBoundDispatcher<T>(
     private val isCurrent: (T) -> Boolean,
-    private val enqueue: (() -> Unit) -> Boolean,
+    private val enqueue: (Runnable) -> Boolean,
 ) {
     fun dispatch(expectedGeneration: T, callback: () -> Unit): Boolean =
-        enqueue {
+        enqueue(Runnable {
             if (isCurrent(expectedGeneration)) {
                 callback()
             }
-        }
+        })
 }
 
 class LifecycleResourceCoordinator {
